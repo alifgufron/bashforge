@@ -1,0 +1,72 @@
+# Configuration for backup-influx.sh
+# This is a sample configuration file. Copy it to backup-influx.conf and modify as needed.
+
+# --- Connection ---
+# Host info for the InfluxDB server.
+HOST="127.0.0.1"
+
+# Port for the InfluxDB backup API (usually 8088).
+BACKUP_PORT="8088"
+
+# Port for InfluxDB query API (usually 8086).
+# Used for pre-flight checks.
+QUERY_PORT="8086"
+
+# --- Authentication ---
+# Optional: Fill these in if your InfluxDB requires authentication for queries.
+# SECURITY WARNING: Storing passwords in plaintext is a risk. Ensure this file has strict permissions.
+INFLUX_USER=""
+INFLUX_PASS=""
+
+# --- Databases ---
+# Set to "yes" to automatically back up all databases found on the server.
+# If "no", the script will only back up the databases listed in the DATABASE array.
+BACKUP_ALL_DATABASES="no"
+
+# A list of specific databases to back up if BACKUP_ALL_DATABASES is "no".
+# This array is ignored if BACKUP_ALL_DATABASES is "yes".
+# Example: DATABASE=("example1_db" "example2_db")
+DATABASE=()
+
+# A list of databases to exclude when BACKUP_ALL_DATABASES is "yes".
+# System databases like '_internal' are good candidates for exclusion.
+# Example: EXCLUDE_DATABASES=["_internal" "telegraf"]
+EXCLUDE_DATABASES=("_internal")
+
+# --- Storage & Compression ---
+# Absolute path for storing all backups.
+PATH_BCKP=""
+
+# Whether to compress the final backup directory into a .tar.gz file.
+# Options: "yes" or "no".
+COMPRESS_BACKUP="yes"
+
+# Algorithm to use for compression. Affects speed and file size.
+# Options: "gzip" (fast, good), "bzip2" (slower, better), "xz" (slowest, best), "zstd" (very fast, good).
+COMPRESSION_TYPE="gzip"
+
+# Unique IDs are always appended to backup filenames in this script.
+# Filenames will be like 'db_name-YYYY-MM-DD_UNIQUEID.tar.gz'.
+
+# --- Retention ---
+# Number of recent backups to keep. Older backups will be deleted.
+# This is applied per database.
+# Set to 0 to disable cleanup entirely (no old backups will be deleted).
+RETENTION_COUNT=7
+
+# --- Pre-flight Checks ---
+# Minimum required free disk space in Gigabytes (GB) in the backup path.
+# The script will exit if available space is below this value.
+MIN_DISK_SPACE_GB=2
+
+# --- Notifications ---
+# Email address for sending status reports.
+MAIL_TO=""
+
+# Custom "From" address for notification emails.
+# If left empty, defaults to "influxdb-backup@<hostname>".
+MAIL_FROM=""
+
+# Whether to send a notification email when the backup process starts.
+# Options: "yes" or "no".
+NOTIFY_ON_START="yes"

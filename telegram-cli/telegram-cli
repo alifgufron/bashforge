@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# telegram-cli v2.0
+# A simple, robust Bash script to send messages, photos, and documents
+# via the Telegram Bot API.
+#
+# Usage:
+# ./telegram-cli --message "Backup OK 🚀"
+# ./telegram-cli --message "Invoice attached" --document /path/to/invoice.pdf
+# ./telegram-cli --message "New server monitoring" --photo /path/to/graph.png
+
+set -euo pipefail
+
+# --- Configuration ---
+# The script sources configuration from one of the following files in order:
+# 1. ~/.config/telegram-cli.conf
+# 2. /path/to/script/telegram-cli.conf
+#
+# Create one of these files with the following content:
+# BOT_TOKEN="your_token"
+# GROUP_ID="your_chat_id" # This is the default chat_id
+
+# --- Load External Config & Set Defaults ---
+BOT_TOKEN=""
+GROUP_ID="" # Default chat_id
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+USER_CONFIG_FILE="${HOME}/.config/telegram-cli.conf"
+SCRIPT_CONFIG_FILE="${SCRIPT_DIR}/telegram-cli.conf"
+
+if [[ -f "$USER_CONFIG_FILE" ]]; then
+  source "$USER_CONFIG_FILE"
+elif [[ -f "$SCRIPT_CONFIG_FILE" ]]; then
+  source "$SCRIPT_CONFIG_FILE"
+fi
+
+# --- Script Info ---
+VERSION="2.1"
+
+# --- Default Vars ---
+MESSAGE=""
+PHOTO_FILE=""
+DOC_FILE=""
+# Use GROUP_ID from config as default, but allow --to to override
+TO_CHAT_ID="${GROUP_ID}"
+SILENT="false"
+
+# --- Show Help ---
+show_help() {
+cat <<EOF
+Usage: $0 --message <text> [options]
+       <command> | $0 [options]
+
+A robust script to send messages and files via the Telegram Bot API.
+
+Options:
+  --message <text>      The main text message. Supports emoji and HTML formatting.
+                        If set to '-', or if omitted and data is piped to the script,
+                        the message will be read from standard input.
+  --photo <file>        Attach a photo. The message will become the caption.
+  --document <file>     Attach a generic document/file. The message becomes the caption.
+  --to <chat_id>        Override the default CHAT_ID.
+  --token <bot_token>   Override the default BOT_TOKEN.
+  --silent              Send the message silently (no notification sound).
+  --help                Show this help message.
+  --version             Show the script version.
+EOF
+}
+
+# --- Parse Command-Line Arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --message) MESSAGE="$2"; shift 2 ;;
+    --photo) PHOTO_FILE="$2"; shift 2 ;;
+    --document) DOC_FILE="$2"; shift 2 ;;
+    --to) TO_CHAT_ID="$2"; shift 2 ;;
+    --token) BOT_TOKEN="$2"; shift 2 ;;
+    --silent) SILENT="true"; shift 1 ;;
+    --help) show_help; exit 0 ;;
+    --version) echo "v$VERSION"; exit 0 ;;
+    *) echo "Unknown argument: $1"; show_help; exit 1 ;;
+  esac
+done
+
+# --- Read message from stdin if necessary ---
+# If --message is '-' or if no message is given and stdin is a pipe
+if [[ "$MESSAGE" == "-" ]] || { [[ -z "$MESSAGE" ]] && [[ ! -t 0 ]]; }; then
+  MESSAGE=$(cat -)
+fi
+
+# --- Validation ---
+if [[ -z "$BOT_TOKEN" ]]; then
+  echo "❌ Error: BOT_TOKEN is not set." >&2
+  exit 1
+fi
+if [[ -z "$TO_CHAT_ID" ]]; then
+  echo "❌ Error: Target chat ID is not set. Use --to <chat_id>." >&2
+  exit 1
+fi
+if [[ -z "$MESSAGE" ]]; then
+  echo "❌ Error: --message is required, or data must be piped to the script." >&2
+  show_help
+  exit 1
+fi
+
+# --- Main Logic ---
+API_URL="https://api.telegram.org/bot${BOT_TOKEN}"
+CURL_OPTS=("--silent" "--show-error")
+
+# Determine which API endpoint to use
+if [[ -n "$PHOTO_FILE" ]]; then
+  # --- Send Photo ---
+  if [[ ! -f "$PHOTO_FILE" ]]; then
+    echo "❌ Error: Photo file not found at: $PHOTO_FILE" >&2
+    exit 1
+  fi
+  ENDPOINT="sendPhoto"
+  API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
+    -F "chat_id=${TO_CHAT_ID}" \
+    -F "photo=@${PHOTO_FILE}" \
+    -F "caption=${MESSAGE}" \
+    -F "parse_mode=HTML" \
+    -F "disable_notification=${SILENT}" \
+    "${API_URL}/${ENDPOINT}")
+
+elif [[ -n "$DOC_FILE" ]]; then
+  # --- Send Document ---
+  if [[ ! -f "$DOC_FILE" ]]; then
+    echo "❌ Error: Document file not found at: $DOC_FILE" >&2
+    exit 1
+  fi
+  ENDPOINT="sendDocument"
+  API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
+    -F "chat_id=${TO_CHAT_ID}" \
+    -F "document=@${DOC_FILE}" \
+    -F "caption=${MESSAGE}" \
+    -F "parse_mode=HTML" \
+    -F "disable_notification=${SILENT}" \
+    "${API_URL}/${ENDPOINT}")
+
+else
+  # --- Send Text Message ---
+  ENDPOINT="sendMessage"
+  API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
+    -d "chat_id=${TO_CHAT_ID}" \
+    -d "text=${MESSAGE}" \
+    -d "parse_mode=HTML" \
+    -d "disable_notification=${SILENT}" \
+    "${API_URL}/${ENDPOINT}")
+fi
+
+# --- Check API Response ---
+if echo "$API_RESPONSE" | grep -q '"ok":true'; then
+  echo "✅ Message sent successfully to chat ID ${TO_CHAT_ID}."
+else
+  echo "❌ Failed to send message." >&2
+  echo "Telegram API Response:" >&2
+  echo "$API_RESPONSE" >&2
+  exit 1
+fi
