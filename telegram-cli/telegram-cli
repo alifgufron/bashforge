@@ -107,6 +107,9 @@ fi
 API_URL="https://api.telegram.org/bot${BOT_TOKEN}"
 CURL_OPTS=("--silent" "--show-error")
 
+# Interpret escape sequences in MESSAGE
+MESSAGE_PROCESSED=$(echo -e "$MESSAGE")
+
 # Determine which API endpoint to use
 if [[ -n "$PHOTO_FILE" ]]; then
   # --- Send Photo ---
@@ -118,7 +121,7 @@ if [[ -n "$PHOTO_FILE" ]]; then
   API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
     -F "chat_id=${TO_CHAT_ID}" \
     -F "photo=@${PHOTO_FILE}" \
-    -F "caption=${MESSAGE}" \
+    -F "caption=${MESSAGE_PROCESSED}" \
     -F "parse_mode=HTML" \
     -F "disable_notification=${SILENT}" \
     "${API_URL}/${ENDPOINT}")
@@ -133,7 +136,7 @@ elif [[ -n "$DOC_FILE" ]]; then
   API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
     -F "chat_id=${TO_CHAT_ID}" \
     -F "document=@${DOC_FILE}" \
-    -F "caption=${MESSAGE}" \
+    -F "caption=${MESSAGE_PROCESSED}" \
     -F "parse_mode=HTML" \
     -F "disable_notification=${SILENT}" \
     "${API_URL}/${ENDPOINT}")
@@ -143,7 +146,7 @@ else
   ENDPOINT="sendMessage"
   API_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST \
     -d "chat_id=${TO_CHAT_ID}" \
-    -d "text=${MESSAGE}" \
+    -d "text=${MESSAGE_PROCESSED}" \
     -d "parse_mode=HTML" \
     -d "disable_notification=${SILENT}" \
     "${API_URL}/${ENDPOINT}")

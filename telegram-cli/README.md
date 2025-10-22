@@ -7,7 +7,7 @@ It supports command-line arguments, reading from `stdin`, and user-specific conf
 ## Features
 
 - Send text messages, photos, and documents.
-- Emojis and HTML formatting supported in messages.
+- Emojis and HTML formatting supported in messages, including automatic interpretation of `\n` for newlines.
 - Read message content from `stdin` for easy piping with other commands.
 - Silent notifications.
 - External configuration files (system-wide and per-user).
@@ -57,6 +57,17 @@ GROUP_ID="-1001234567890"
 **Sending a simple text message:**
 ```bash
 telegram-cli --message "✅ System backup completed successfully."
+```
+
+**Sending a multiline message:**
+```bash
+telegram-cli --message "First line of message.\nSecond line with more details."
+# Or, type directly in the shell:
+telegram-cli --message "
+Multi-line message
+from the command line.
+This is line 3.
+"
 ```
 
 **Sending a photo with a caption:**
