@@ -20,6 +20,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 ```bash
 ./SendMail.sh   --to "user@example.com"   --subject "Daily Report 🧾"   --body "Backup process successful 🚀\n\nRegards,\nServer01"
 ```
+> 📝 The `--body` argument fully supports newlines, either by using `\n` escape sequences or by typing multiline text directly in the shell.
 
 ---
 
@@ -56,7 +57,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 | `--to`      | Recipient's email address |
 | `--from`    | Sender's email address (defaults to `monitor@hibridge.net`) |
 | `--subject` | Email subject (supports emoji) |
-| `--body`    | Text message content (supports emoji and newlines `\n`) |
+| `--body`    | Text message content (supports emoji and newlines, including `\n` escape sequences and multiline input) |
 | `--image`   | Include an inline image (can be used multiple times) |
 | `--attach`  | Attach a file (can be used multiple times) |
 
