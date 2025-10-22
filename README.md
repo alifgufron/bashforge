@@ -32,4 +32,11 @@ A simple but effective script for sending emails from the command line.
 A command-line interface to send messages and files through the Telegram Bot API.
 
 - **Features**: Send text, photos, or documents. Can be easily integrated into other scripts by piping output.
-- **Details**: See the [telegram-cli README](./telegram-cli/README.md) for setup and usage instructions.
+- **Details**: See the [telegram-cli README](./telegram-cli/) for setup and usage instructions.
+
+### 5. [DiskMon](./DiskMon/)
+
+A comprehensive script for monitoring hard disk health and filesystem usage.
+
+- **Features**: Monitors SMART attributes for HDDs/SSDs, detects critical health issues, provides filesystem usage reports, and sends email notifications. Supports both Linux and BSD, with robust timeout mechanisms for `smartctl` and conditional dependency handling.
+- **Details**: See the [DiskMon README](./DiskMon/README.md) for full documentation.
