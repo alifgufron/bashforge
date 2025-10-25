@@ -28,8 +28,8 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 ## Installation & Setup
 1.  **Clone Repository:** (If the script is in a repository)
     ```bash
-    git clone https://github.com/your-repo/BashScript4life.git
-    cd BashScript4life/BackupMysql
+    git clone https://github.com/alifgufron/bashforge.git
+    cd bashforge/BackupMysql
     ```
 2.  **Create Configuration File:** Copy the sample configuration file:
     ```bash
