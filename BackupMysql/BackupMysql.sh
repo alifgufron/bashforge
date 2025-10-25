@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 
-# A robust script to back up MySQL databases with locking, pre-flight checks,
-# multiple compression strategies, and detailed email notifications.
+# MIT License
+#
+# Copyright (c) 2025 alifgufron
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 set -euo pipefail
 
@@ -37,6 +56,9 @@ declare -A FAILED_DB_ERRORS
 declare -A DB_SIZES_PRE_COMPRESS
 declare -A DB_SIZES_POST_COMPRESS
 declare -A DB_ARCHIVE_PATHS
+
+# --- Global Result for Cleanup ---
+declare -A DELETED_FILES_BY_DB=()
 
 # Global variables for per_job summary
 JOB_ARCHIVE_PATH=""
@@ -94,9 +116,15 @@ validate_config() {
         log "FATAL: BACKUP_ALL_DATABASES is 'no' but the DATABASES array is empty."
         has_error=1
     fi
-    if [[ "$COMPRESSION_STRATEGY" != "per_database" && "$COMPRESSION_STRATEGY" != "per_job" ]]; then
-        log "FATAL: COMPRESSION_STRATEGY must be 'per_database' or 'per_job'."
+    if [[ "${COMPRESSION_ENABLED,,}" != "yes" && "${COMPRESSION_ENABLED,,}" != "no" ]]; then
+        log "FATAL: COMPRESSION_ENABLED must be 'yes' or 'no'."
         has_error=1
+    fi
+    if [[ "${COMPRESSION_ENABLED,,}" == "yes" ]]; then
+        if [[ "$COMPRESSION_STRATEGY" != "per_database" && "$COMPRESSION_STRATEGY" != "per_job" ]]; then
+            log "FATAL: When COMPRESSION_ENABLED is 'yes', COMPRESSION_STRATEGY must be 'per_database' or 'per_job'."
+            has_error=1
+        fi
     fi
 
     if [[ $has_error -eq 1 ]]; then
@@ -192,13 +220,29 @@ backup_databases() {
 
     for db in "${DATABASES[@]}"; do
         log "INFO: Backing up database '$db'..."
-        local sql_file="${dest_dir}/${db}.sql"
+        
+        local sql_filename="${db}"
+        # If compression is disabled, this function is responsible for handling the unique ID.
+        # If compression is enabled, the compress_backups function will handle it.
+        if [[ "${COMPRESSION_ENABLED,,}" == "no" && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+            sql_filename+="_$(mktemp -u XXXXXX)"
+        fi
+        sql_filename+=".sql"
+        
+        local sql_file="${dest_dir}/${sql_filename}"
         
         if mysqldump "${mysql_dump_opts[@]}" "$db" > "$sql_file" 2>> "$LOG_FILE"; then
             SUCCESS_DBS+=("$db")
             local size
             size=$(du -sh "$sql_file" | awk '{print $1}')
             DB_SIZES_PRE_COMPRESS["$db"]=$size
+
+            # If compression is disabled, the final archive path is this .sql file.
+            # We must set it here because this function determines the unique filename.
+            if [[ "${COMPRESSION_ENABLED,,}" == "no" ]]; then
+                DB_ARCHIVE_PATHS["$db"]=$sql_file
+            fi
+
             log "SUCCESS: Backup for database '$db' completed ($size)."
         else
             FAILED_DBS+=("$db")
@@ -274,33 +318,69 @@ cleanup_old_backups() {
         return
     fi
 
+    if [[ "${UNIQUE_ID_ENABLED,,}" == "no" ]]; then
+        log "INFO: UNIQUE_ID_ENABLED is 'no', RETENTION_COUNT is ignored and cleanup process is disabled."
+        return
+    fi
+
     log "INFO: Cleaning up old backups..."
     local base_host_dir="${BACKUP_PATH}/${MYSQL_HOST}"
     if [[ ! -d "$base_host_dir" ]]; then return; fi
 
-    local year="$YEAR"
-    local month="$MONTH"
-    local archive_ext=$(get_archive_extension)
-
-    if [[ "$COMPRESSION_STRATEGY" == "per_database" ]]; then
-        for db in "${DATABASES[@]}"; do
-            local find_pattern="${db}"
-            if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
-                find_pattern+="_*.tar.*"
-            else
-                find_pattern+=".tar.*"
-            fi
-            # Get files sorted by modification time (newest first), then take the oldest ones
-            find "$base_host_dir" -name "$find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2- | tail -n +$((RETENTION_COUNT + 1)) | xargs -I {} rm -v {} >> "$LOG_FILE"
-        done
-    elif [[ "$COMPRESSION_STRATEGY" == "per_job" ]]; then
-        local current_month_dir="${base_host_dir}/${YEAR}/${MONTH}"
-        if [[ -d "$current_month_dir" ]]; then
-            local find_pattern="${DATE}*.tar.*"
-            # Get files sorted by modification time (newest first), then take the oldest ones
-            find "$current_month_dir" -name "$find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2- | tail -n +$((RETENTION_COUNT + 1)) | xargs -I {} rm -v {} >> "$LOG_FILE"
+    local files_to_delete=()
+    if [[ "${COMPRESSION_ENABLED,,}" == "yes" && "$COMPRESSION_STRATEGY" == "per_job" ]]; then
+        local find_pattern="[0-9][0-9]*.tar.*"
+        mapfile -t files_to_delete < <(find "$base_host_dir" -name "$find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2- | tail -n +$((RETENTION_COUNT + 1)))
+        if [[ ${#files_to_delete[@]} -gt 0 ]]; then
+            log "INFO: Found ${#files_to_delete[@]} total files to delete for per-job strategy."
+            for file in "${files_to_delete[@]}"; do
+                if [[ -n "$file" ]]; then
+                    log "INFO: Deleting old backup: $file"
+                    if rm -f "$file"; then
+                        DELETED_FILES_BY_DB["_per_job_"]+="$(basename "$file") "
+                    fi
+                fi
+            done
         fi
+    else
+        for db in "${DATABASES[@]}"; do
+            local find_pattern=""
+            if [[ "${COMPRESSION_ENABLED,,}" == "yes" ]]; then
+                find_pattern="${db}"
+                if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                    find_pattern+="_*.tar.*"
+                else
+                    find_pattern+=".tar.*"
+                fi
+            else # No compression
+                find_pattern="${db}"
+                if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                    find_pattern+="_*.sql"
+                else
+                    find_pattern+=".sql"
+                fi
+            fi
+            
+            local found_files
+            mapfile -t found_files < <(find "$base_host_dir" -name "$find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2- | tail -n +$((RETENTION_COUNT + 1)))
+            if [[ ${#found_files[@]} -gt 0 ]]; then
+                log "INFO: Found ${#found_files[@]} files to delete for database '$db'."
+                for file in "${found_files[@]}"; do
+                    if [[ -n "$file" ]]; then
+                        log "INFO: Deleting old backup: $file"
+                        if rm -f "$file"; then
+                            DELETED_FILES_BY_DB["$db"]+="$(basename "$file") "
+                        fi
+                    fi
+                done
+            fi
+        done
     fi
+
+    if [[ ${#DELETED_FILES_BY_DB[@]} -eq 0 ]]; then
+        log "INFO: No old backups found for deletion."
+    fi
+
     log "INFO: Cleanup finished."
 }
 
@@ -311,15 +391,16 @@ cleanup_old_backups() {
 send_mail() {
     local mail_file
     mail_file=$(mktemp)
-    local encoded_subject="=?UTF-8?B?$(echo -n "$3" | base64)?="
+    # The subject is passed directly; modern MTAs can handle UTF-8.
+    # The body is printed with printf for robust handling of newlines.
     {
         echo "From: $2";
         echo "To: $1";
-        echo "Subject: $encoded_subject";
+        echo "Subject: $3";
         echo "MIME-Version: 1.0";
         echo "Content-Type: text/plain; charset=UTF-8";
         echo "";
-        echo -e "$4";
+        printf "%b" "$4";
     } > "$mail_file"
     /usr/sbin/sendmail -t < "$mail_file"
     rm -f "$mail_file"
@@ -327,23 +408,23 @@ send_mail() {
 
 send_start_notification() {
     if [[ "${NOTIFY_ON_START,,}" != "yes" ]]; then return; fi
-    local subject="🚀 [Backup Started] MySQL Backup on $MYSQL_HOST"
+    local subject="🚀 [Backup Mysql Started] Report for: $MYSQL_HOST - From $HOSTNAME"
     local from="${MAIL_FROM:-mysql-backup@$HOSTNAME}"
     local body="The MySQL backup process has started.\n\nDatabases to be backed up:\n"
     for db in "${DATABASES[@]}"; do body+="- $db\n"; done
-    log "INFO: Sending start notification..."
+    log "INFO: Sending start notification to $MAIL_TO..."
     send_mail "$MAIL_TO" "$from" "$subject" "$body"
 }
 
 send_report() {
     local status=$1
     local duration=$2
-    local error_msg=${3:-"N/A"}
+    local error_msg=${3:-N/A}
     local subject=""
     if [[ "$status" == "SUCCESS" ]]; then
-        subject="✅ [Backup SUCCESS] MySQL Backup on $MYSQL_HOST"
+        subject="✅ [Backup Mysql] Report for: $MYSQL_HOST - From $HOSTNAME - Status [SUCCESS]"
     else
-        subject="❌ [Backup FAILED] MySQL Backup on $MYSQL_HOST"
+        subject="❌ [Backup Mysql] Report for: $MYSQL_HOST - From $HOSTNAME - Status [FAILED]"
     fi
     local from="${MAIL_FROM:-mysql-backup@$HOSTNAME}"
 
@@ -357,9 +438,8 @@ send_report() {
         body+="Successful Backups:\n"
         local year="$YEAR"
         local month="$MONTH"
-        local archive_ext=$(get_archive_extension)
 
-        if [[ "$COMPRESSION_STRATEGY" == "per_job" ]]; then
+        if [[ "${COMPRESSION_ENABLED,,}" == "yes" && "$COMPRESSION_STRATEGY" == "per_job" ]]; then
             body+="- 📦 Backup Job Summary\n"
             body+="  - Size (uncompressed total): ${JOB_PRE_COMPRESS_SIZE:-N/A}\n"
             body+="  - Size (compressed total): ${JOB_POST_COMPRESS_SIZE:-N/A}\n"
@@ -372,19 +452,16 @@ send_report() {
             done
             body+="\n"
 
-            # --- Get Old Backup List & Total Size for the Job Archive ---
             local all_job_backups=()
             local current_search_base_dir="${BACKUP_PATH}/${MYSQL_HOST}"
-            local current_find_start_dir="${current_search_base_dir}/${YEAR}/${MONTH}"
-            local current_find_pattern="${DATE}*.tar.*" # Match any day.ext in this month
-
-            if [[ -d "$current_find_start_dir" ]]; then
-                mapfile -t all_job_backups < <(find "$current_find_start_dir" -name "$current_find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2-)
+            if [[ -d "$current_search_base_dir" ]]; then
+                local find_pattern="[0-9][0-9]*.tar.*"
+                mapfile -t all_job_backups < <(find "$current_search_base_dir" -name "$find_pattern" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2-)
             fi
 
             if [[ ${#all_job_backups[@]} -gt 0 ]]; then
                 if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
-                    body+="  🗃️ Old Job Backup List (newest first):\n"
+                    body+="  🗃️ Old Backup List (newest first):\n"
                     for backup_file in "${all_job_backups[@]}"; do
                         if [[ -f "$backup_file" ]]; then
                             local m_date=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$backup_file")
@@ -393,31 +470,50 @@ send_report() {
                         fi
                     done
                     body+="\n"
-
-                    local total_size=$(printf "%s\0" "${all_job_backups[@]}" | xargs -0 du -ch | tail -n1 | awk '{print $1}')
-                    body+="  💾 Total size all job backups for this month: ${total_size:-0B}\n"
-                else
-                    body+="  (Old Job Backup List is not displayed when UNIQUE_ID_ENABLED is 'no')\n"
                 fi
+            fi
+
+            if [[ -v "DELETED_FILES_BY_DB[_per_job_]" && -n "${DELETED_FILES_BY_DB[_per_job_]}" ]]; then
+                body+="  🗑️ Old Backup Deleted:\n"
+                for deleted_file in ${DELETED_FILES_BY_DB[_per_job_]}; do
+                    body+="   - $deleted_file\n"
+                done
+                body+="\n"
+            fi
+
+            if [[ ${#all_job_backups[@]} -gt 0 && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                local total_size=$(printf "%s\0" "${all_job_backups[@]}" | xargs -0 du -ch | tail -n1 | awk '{print $1}')
+                body+="  💾 Total size all job backups: ${total_size:-0B}\n"
             fi
             body+="\n-------------------------------------\n"
 
-        elif [[ "$COMPRESSION_STRATEGY" == "per_database" ]]; then
+        else # Handles per_database and no-compression
             for db in "${SUCCESS_DBS[@]}"; do
                 body+="- 📦 database $db\n"
                 body+="  - Size (uncompressed): ${DB_SIZES_PRE_COMPRESS[$db]:-N/A}\n"
-                body+="  - Size (compressed): ${DB_SIZES_POST_COMPRESS[$db]:-N/A}\n"
+                if [[ "${COMPRESSION_ENABLED,,}" == "yes" ]]; then
+                    body+="  - Size (compressed): ${DB_SIZES_POST_COMPRESS[$db]:-N/A}\n"
+                fi
                 body+="  - filename: $(basename "${DB_ARCHIVE_PATHS[$db]}")\n"
-                body+="  - Location: ${BACKUP_PATH}/${MYSQL_HOST}/${YEAR}/${MONTH}/${DATE}\n\n"
+                body+="  - Location: $(dirname "${DB_ARCHIVE_PATHS[$db]}")\n\n"
 
-                # --- Get Old Backup List & Total Size for per_database ---
                 local all_db_backups=()
                 local current_search_base_dir="${BACKUP_PATH}/${MYSQL_HOST}"
-                local find_pattern="${db}"
-                if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
-                    find_pattern+="_*.tar.*"
-                else
-                    find_pattern+=".tar.*"
+                local find_pattern=""
+                if [[ "${COMPRESSION_ENABLED,,}" == "yes" ]]; then
+                    find_pattern="${db}"
+                    if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                        find_pattern+="_*.tar.*"
+                    else
+                        find_pattern+=".tar.*"
+                    fi
+                else # No compression
+                    find_pattern="${db}"
+                    if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                        find_pattern+="_*.sql"
+                    else
+                        find_pattern+=".sql"
+                    fi
                 fi
 
                 if [[ -d "$current_search_base_dir" ]]; then
@@ -436,12 +532,20 @@ send_report() {
                             fi
                         done
                         body+="\n"
-
-                        local total_size=$(printf "%s\0" "${all_db_backups[@]}" | xargs -0 du -ch | tail -n1 | awk '{print $1}')
-                        body+="  💾 Total size all backups for $db: ${total_size:-0B}\n"
-                    else
-                        body+="  (Old Backup List is not displayed when UNIQUE_ID_ENABLED is 'no')\n"
                     fi
+                fi
+
+                if [[ -v "DELETED_FILES_BY_DB[$db]" && -n "${DELETED_FILES_BY_DB[$db]}" ]]; then
+                    body+="  🗑️ Old Backup Deleted:\n"
+                    for deleted_file in ${DELETED_FILES_BY_DB[$db]}; do
+                        body+="  - $deleted_file\n"
+                    done
+                    body+="\n"
+                fi
+
+                if [[ ${#all_db_backups[@]} -gt 0 && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                    local total_size=$(printf "%s\0" "${all_db_backups[@]}" | xargs -0 du -ch | tail -n1 | awk '{print $1}')
+                    body+="  💾 Total size all backups for $db: ${total_size:-0B}\n"
                 fi
                 body+="\n-------------------------------------\n"
             done
@@ -454,7 +558,7 @@ send_report() {
         body+="\n"
     fi
 
-    log "INFO: Sending final report..."
+    log "INFO: Sending final report to $MAIL_TO..."
     send_mail "$MAIL_TO" "$from" "$subject" "$body"
 }
 
@@ -464,8 +568,20 @@ send_report() {
 
 main() {
     # --- Config & Environment Setup ---
-    local config_file_arg="${1:-mysql-backup.conf}"
-    local config_file="${SCRIPT_DIR}/${config_file_arg}"
+    if [ -z "${1:-}" ]; then
+        echo "FATAL: No configuration file specified."
+        echo "Usage: $0 /path/to/your/config.conf"
+        exit 1
+    fi
+    local config_file_arg="$1"
+    local config_file=""
+    if [[ "$config_file_arg" == /* ]]; then
+        # Argument is an absolute path
+        config_file="$config_file_arg"
+    else
+        # Argument is a relative path, prepend script directory
+        config_file="${SCRIPT_DIR}/${config_file_arg}"
+    fi
     if [[ ! -f "$config_file" ]]; then
         echo "FATAL: Configuration file not found at: $config_file"
         exit 1
@@ -494,23 +610,35 @@ main() {
 
     # --- Main Backup Logic ---
     local base_month_dir="${BACKUP_PATH}/${MYSQL_HOST}/${YEAR}/${MONTH}"
-    local temp_dump_dir="${BACKUP_PATH}/.tmp_dumps_$$"
-    
-    mkdir -p "$base_month_dir" # Create up to month level
-    mkdir -p "$temp_dump_dir"
+    mkdir -p "$base_month_dir"
 
-    local final_archive_dir=""
-    if [[ "$COMPRESSION_STRATEGY" == "per_database" ]]; then
-        final_archive_dir="${base_month_dir}/${DATE}" # Per-database archives go into a day folder
-        mkdir -p "$final_archive_dir"
-    elif [[ "$COMPRESSION_STRATEGY" == "per_job" ]]; then
-        final_archive_dir="${base_month_dir}" # Per-job archive goes into month folder
+    if [[ "${COMPRESSION_ENABLED,,}" == "yes" ]]; then
+        log "INFO: Compression is enabled."
+        local temp_dump_dir="${BACKUP_PATH}/.tmp_dumps_$$"
+        mkdir -p "$temp_dump_dir"
+
+        local final_archive_dir=""
+        if [[ "$COMPRESSION_STRATEGY" == "per_database" ]]; then
+            final_archive_dir="${base_month_dir}/${DATE}" # Per-database archives go into a day folder
+            mkdir -p "$final_archive_dir"
+        elif [[ "$COMPRESSION_STRATEGY" == "per_job" ]]; then
+            final_archive_dir="${base_month_dir}" # Per-job archive goes into month folder
+        fi
+
+        backup_databases "$temp_dump_dir"
+        compress_backups "$temp_dump_dir" "$final_archive_dir"
+
+        rm -rf "$temp_dump_dir"
+    else
+        log "INFO: Compression is disabled. Storing raw .sql files."
+        # Dump SQL files directly into the daily folder
+        local final_sql_dir="${base_month_dir}/${DATE}"
+        mkdir -p "$final_sql_dir"
+        backup_databases "$final_sql_dir"
+
+        # The DB_ARCHIVE_PATHS array is now populated within backup_databases()
+        # when compression is disabled, so no action is needed here.
     fi
-
-    backup_databases "$temp_dump_dir"
-    compress_backups "$temp_dump_dir" "$final_archive_dir"
-
-    rm -rf "$temp_dump_dir"
 
     # --- Final Reporting & Cleanup ---
     cleanup_old_backups

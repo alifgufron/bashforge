@@ -6,7 +6,7 @@
 MYSQL_USER="userbackup"
 # Password for the MySQL user.
 # SECURITY WARNING: Storing passwords in plaintext is a risk. Ensure this file has strict permissions.
-MYSQL_PASS="@huZK5r4CwF(xC6i"
+MYSQL_PASS="yourpassword"
 # MySQL host address (e.g., 127.0.0.1, localhost, or remote IP/hostname).
 MYSQL_HOST="127.0.0.1"
 
@@ -28,13 +28,19 @@ EXCLUDE_DATABASES=("information_schema" "mysql" "performance_schema" "sys")
 # Absolute path for storing all backups.
 BACKUP_PATH="/BACKUP_DIR/DATABASES"
 
+# Enable or disable compression. Options: "yes", "no"
+# If "no", the script will store raw .sql files.
+COMPRESSION_ENABLED="yes"
+
 # Compression strategy. Options:
 # "per_database" - Each database is compressed into its own archive (e.g., db1.tar.gz, db2.tar.gz).
 # "per_job"      - All successful database dumps from a single run are combined into one archive (e.g., 20.tar.gz).
+# Only relevant if COMPRESSION_ENABLED="yes".
 COMPRESSION_STRATEGY="per_database"
 
 # Compression type. Affects file size and compression/decompression speed.
 # Options: "gzip", "bzip2", "xz"
+# Only relevant if COMPRESSION_ENABLED="yes".
 COMPRESSION_TYPE="gzip"
 
 # Whether to append a unique ID to backup filenames. Useful for multiple backups per day.
@@ -46,6 +52,7 @@ UNIQUE_ID_ENABLED="no"
 # Number of recent backup files/archives to keep. Older ones will be deleted.
 # This is applied based on the COMPRESSION_STRATEGY and UNIQUE_ID_ENABLED settings.
 # Set to 0 to disable cleanup entirely (no old backups will be deleted).
+# Note: If UNIQUE_ID_ENABLED="no", RETENTION_COUNT is ignored, and no old backups will be cleaned up.
 RETENTION_COUNT=7
 
 # --- Pre-flight Checks ---
