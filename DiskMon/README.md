@@ -1,38 +1,38 @@
 # Hard Disk Health Monitor Script (harddisk_monitor.sh)
 
-## Version 2.0
+## Version 3.2 (Robust Parsing)
 
 ### Description
 
-This is a robust and versatile Bash script for monitoring the health of hard disks (both HDD and SSD) using `smartctl`. It is designed to be run automatically as a cron job, providing detailed email reports on disk status, critical SMART attributes, and overall system health.
+This is a robust and versatile Bash script for monitoring the health of hard disks (HDD, SSD, NVMe) using `smartctl`. It is designed to be run automatically as a cron job, providing detailed email reports on disk status, critical SMART attributes, and overall system health.
 
-The script is self-contained, POSIX-compliant, and includes OS detection to ensure compatibility with both Linux and BSD-based systems.
+The script features enhanced compatibility for both Linux and BSD systems, with improved automatic OS and device detection methods. It now intelligently handles various disk controller types including SATA (atacam/sat), NVMe, and MegaRAID, ensuring correct `smartctl` command invocation and robust parsing of their diverse outputs. It also includes retry mechanisms for `smartctl` commands to prevent script stoppage on intermittent errors.
 
 ### Key Features
 
-- **Cross-Platform Compatibility**: Automatically detects the OS (Linux or BSD) and uses the appropriate commands for disk discovery (`lsblk` on Linux, `camcontrol` on BSD).
-- **Comprehensive SMART Reporting**: Extracts and reports on essential disk health indicators:
+- **Cross-Platform Compatibility**: Automatically detects the OS (Linux or BSD) and uses the appropriate commands for disk discovery. Now includes robust detection for SATA, NVMe, and MegaRAID devices.
+- **Comprehensive SMART Reporting**: Extracts and reports on essential disk health indicators, with enhanced parsing for NVMe-specific attributes:
     - Overall health status (`PASSED`, `FAILED`).
     - Basic disk identity (Model, Serial Number, Firmware, Capacity).
-    - Disk type detection (SSD or HDD).
-    - Disk age and usage (`Power_On_Hours`, `Power_Cycle_Count`).
+    - Disk type detection (HDD, SATA SSD, NVMe SSD).
+    - Disk interface (SATA, PCIe NVMe, SAS/RAID).
+    - Disk form factor (M.2, 2.5 inches, 3.5 inches).
+    - Disk age and usage (`Power On Hours`, `Power Cycles`).
     - Disk temperature.
-    - ATA Error Count.
-- **Critical Attribute Monitoring**: Specifically tracks critical SMART attributes that are strong predictors of disk failure:
-    - `Reallocated_Sector_Ct`
-    - `Current_Pending_Sector_Ct`
-    - `Offline_Uncorrectable`
-    - `UDMA_CRC_Error_Count`
+    - Total Data Written (TBW) for all SSD types.
+    - Data Units Read/Written for NVMe.
+    - Unsafe Shutdowns and Controller Busy Time for NVMe.
+- **Critical Attribute Monitoring**: Specifically tracks critical SMART attributes that are strong predictors of disk failure, with tailored checks for NVMe devices (e.g., Media and Data Integrity Errors, Percentage Used).
 - **SSD & HDD Specific Metrics**: 
-    - For **SSDs**, it reports the full `Wear_Leveling_Count` line with a human-readable interpretation of the NAND health percentage, and calculates the total data written (`TBW`).
-    - For **HDDs**, it reports the mechanical `Load_Cycle_Count`.
+    - For **SSDs** (SATA & NVMe), it reports NAND health (derived from Wear Leveling Count or Percentage Used) and calculates total data written (`TBW`).
+    - For **HDDs**, it reports `Load Cycle Count`.
 - **Filesystem Usage**: Includes a `df -h` report to give a quick overview of filesystem capacity.
-- **Filesystem Usage Warnings**: Generates warnings if any mounted filesystem exceeds a configurable usage threshold (e.g., 90% full).
+- **Filesystem Usage Warnings**: Generates warnings if any mounted filesystem exceeds a configurable usage threshold (e.g., 90% full), with an option to ignore specific filesystems (e.g., `devfs`, `tmpfs`).
 - **Self-Contained Email Reports**: Generates and sends clear, well-formatted email reports without external script dependencies. The subject line provides an at-a-glance status (`OK`, `WARNING`, or `CRITICAL`).
 - **Robust and Safe**: 
     - Uses `set -euo pipefail` for strict error checking.
     - All data extraction commands are designed to be fail-safe to prevent the script from exiting unexpectedly.
-    - Employs a sophisticated, conditional timeout mechanism for `smartctl` calls to prevent the script from hanging, adapting to different disk controller types (e.g., SATA, MegaRAID).
+    - Employs a sophisticated, conditional timeout mechanism for `smartctl` calls to prevent the script from hanging, adapting to different disk controller types (e.g., SATA, MegaRAID). Includes a retry mechanism for `smartctl` commands to handle intermittent failures.
     - Allows `smartctl` checks to be optional, enabling `df -h` reports even if `smartctl` is unavailable.
 
 ### Prerequisites
@@ -40,7 +40,7 @@ The script is self-contained, POSIX-compliant, and includes OS detection to ensu
 - A POSIX-compliant shell (e.g., `bash`, `sh`).
 - `smartmontools` (`smartctl` command) must be installed (can be optional, see `REQUIRE_SMARTCTL` in configuration).
 - A configured Mail Transfer Agent (MTA) that provides the `sendmail` command.
-- `perl` (optional, but recommended on BSD for reliable command timeouts, especially for SATA/ATA disks).
+- `perl` (optional, but recommended on BSD for reliable command timeouts for standard SATA/ATA disks).
 - `bc` for floating-point calculations (used for TBW and age in years).
 
 ### Installation & Setup
@@ -56,8 +56,10 @@ The script is self-contained, POSIX-compliant, and includes OS detection to ensu
     - `REPORT_EMAIL_TO`: The email address to send reports to.
     - `REPORT_EMAIL_FROM`: The "From" address for the email report.
     - `LOG_FILE`: The path to the log file (ensure the directory is writable).
-- `DISK_USAGE_WARNING_THRESHOLD`: The percentage of disk usage (e.g., 90) at which a warning will be triggered.
-- `REQUIRE_SMARTCTL`: Set to `true` (default) if `smartctl` is a mandatory dependency. Set to `false` if you want the script to proceed with only `df -h` checks when `smartctl` is not available.
+    - `DISK_USAGE_WARNING_THRESHOLD`: The percentage of disk usage (e.g., 90) at which a warning will be triggered.
+    - `REQUIRE_SMARTCTL`: Set to `true` (default) if `smartctl` is a mandatory dependency. Set to `false` if you want the script to proceed with only `df -h` checks when `smartctl` is not available.
+    - `IGNORE_FILESYSTEMS`: A space-separated list of filesystem types or mount points to ignore from usage checks (e.g., `devfs tmpfs`).
+    - `MAX_SMARTCTL_RETRIES`: The number of times to retry a `smartctl` command if it initially fails or times out (default is 3).
 
 ### Usage
 
@@ -78,7 +80,7 @@ For automated monitoring, it is highly recommended to run the script as a cron j
 The email report is formatted for readability and provides a quick summary followed by detailed information for each disk.
 
 ```
-Subject: [DiskMon Report] on your-server - 2025-10-22 - WARNING (1 Warnings)
+Subject: [DiskMon Report] on your-server - 2025-10-24 - WARNING (2 Warnings)
 
 === Filesystem Usage on your-server ===
 Filesystem      Size  Used Avail Use% Mounted on
@@ -92,22 +94,21 @@ devtmpfs        3.9G     0  3.9G   0% /dev
 === SMART Health Status ===
 
 ----------------------------------------------------
-💽 Disk: /dev/sda (Type: SSD)
+💽 Disk: /dev/ada0 (Type: SATA SSD, Interface: SATA, FormFactor: M.2)
 ----------------------------------------------------
 
-Capacity: 256,060,514,304 bytes [256 GB]
-Model Family: Samsung based SSDs
-Device Model: Samsung SSD 860 PRO
-Firmware Version: RVM02B6Q
-Serial Number: S3Z7NX0K123456
-
-Power Cycle Count: 12 Power_Cycle_Count       0x0032   100   100   000    Old_age   Always       -       1500
-SMART Health Status: ✅ PASSED
-Power On Hours: 15000 (Approx. 1.7 years of operation)
+Device Model: Samsung SSD 860 EVO M.2 250GB
+Firmware Version: RVT24B6Q
+Serial Number: S413NS0R220757L
+Capacity: 250,059,350,016 bytes [250 GB]
+Health: PASSED
 Temperature: 35°C
-177 Wear_Leveling_Count     0x0013   099   099   000    Pre-fail  Always       -       7
-  -> NAND Health: 99%
-Total Data Written: 25.60 TB
+Power On Hours: 38518 (Approx. 4.4 years of operation)
+Total Data Written: 4.23 TB
+Power Cycles: 140 (Normal)
+
+----------------------------------------
+✅ No SMART errors logged
 
 Critical Attributes:
   - ✅ Reallocated_Sector_Ct: 0 (OK)
@@ -116,20 +117,50 @@ Critical Attributes:
   - ✅ UDMA_CRC_Error_Count: 0 (OK)
 
 ----------------------------------------------------
-💽 Disk: /dev/sdb (Type: HDD)
+💽 Disk: /dev/nvme0 (Type: NVMe SSD, Interface: PCIe NVMe, FormFactor: M.2/U.2)
 ----------------------------------------------------
 
-Capacity: 4,000,787,030,016 bytes [4.00 TB]
-Model Family: Seagate IronWolf
+Device Model: Samsung SSD 980 PRO 250GB
+Firmware Version: 4B2QGXA7
+Serial Number: S5GZNJ0RC17077B
+Capacity: 250,059,350,016 bytes [250 GB]
+Health: PASSED
+Temperature: 30°C
+Power On Hours: 31539 (Approx. 3.6 years of operation)
+Total Data Written: 31.6 TB
+Power Cycles: 21 (Normal)
+NVMe Version: 1.3
+Percentage Used: 95%
+  -> NAND Health: 5%
+Data Units Written: 31.6 TB
+Data Units Read: 20.8 TB
+Unsafe Shutdowns: 15
+Controller Busy Time: 1436 minutes
+
+----------------------------------------
+✅ No SMART errors logged
+
+Critical Attributes (NVMe):
+  - Media and Data Integrity Errors: 0 (OK)
+  - Percentage Used: 95% (WARNING!)
+
+----------------------------------------------------
+💽 Disk: /dev/sdb (Type: HDD, Interface: SATA/SAS, FormFactor: 3.5 inches)
+----------------------------------------------------
+
 Device Model: ST4000VN008-2DR166
 Firmware Version: SC60
 Serial Number: ZGY8N5H8
-
-Power Cycle Count: 12 Power_Cycle_Count       0x0032   100   100   020    Old_age   Always       -       54
-SMART Health Status: ✅ PASSED
-Power On Hours: 27746 (Approx. 3.2 years of operation)
+Capacity: 4,000,787,030,016 bytes [4.00 TB]
+Health: PASSED
 Temperature: 28°C
+Power On Hours: 27746 (Approx. 3.2 years of operation)
+Total Data Written: 2.15 TB
+Power Cycles: 54 (Normal)
 Load Cycle Count: 8647
+
+----------------------------------------
+⚠️ SMART Errors or Selftests present (see details)
 
 Critical Attributes:
   - ⚠️ Reallocated_Sector_Ct: 275 (WARNING!)
@@ -139,5 +170,5 @@ Critical Attributes:
 
 
 === Summary ===
-WARNING: Found 1 warning(s) on disks (e.g., high attribute values or SMART disabled).
+WARNING: Found 2 warning(s) on disks (e.g., high attribute values or SMART disabled).
 ```
