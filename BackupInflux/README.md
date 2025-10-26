@@ -45,7 +45,7 @@ This Bash script provides a robust and flexible solution for backing up InfluxDB
 3.  **Edit Configuration:** Open `backup-influx.conf` with your favorite text editor and adjust parameters according to your InfluxDB environment. Ensure `PATH_BCKP` is a valid and writable directory.
 4.  **Set Permissions:** Make sure the script is executable:
     ```bash
-    chmod +x backup-influx.sh
+    chmod +x BackupInflux
     ```
 
 ## Configuration (`backup-influx.conf`)
@@ -68,14 +68,14 @@ Some important parameters you need to adjust:
 ### 1. Performing a Backup
 Run the script by providing your configuration file:
 ```bash
-./backup-influx.sh backup-influx.conf
+./BackupInflux backup-influx.conf
 ```
 If you do not provide a configuration file name, the script will look for `backup-influx.conf` by default.
 
 ### 2. Performing a Restore
 To restore a database from a backup:
 ```bash
-./backup-influx.sh restore backup-influx.conf
+./BackupInflux restore backup-influx.conf
 ```
 The script will display a list of available backups (both compressed files and uncompressed directories). You will be prompted to select a backup and provide a new target database name.
 
