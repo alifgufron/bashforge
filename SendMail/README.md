@@ -1,4 +1,4 @@
-# 📬 SendMail.sh (v1.1)
+# 📬 SendMail
 
 A simple Bash script to send emails via `sendmail` with support for **emoji**, **inline images**, and **attachments**, without needing extra libraries.
 
@@ -18,7 +18,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 ## 💻 Basic Usage
 
 ```bash
-./SendMail.sh   --to "user@example.com"   --subject "Daily Report 🧾"   --body "Backup process successful 🚀\n\nRegards,\nServer01"
+./SendMail   --to "user@example.com"   --subject "Daily Report 🧾"   --body "Backup process successful 🚀\n\nRegards,\nServer01"
 ```
 > 📝 The `--body` argument fully supports newlines, either by using `\n` escape sequences or by typing multiline text directly in the shell.
 
@@ -27,7 +27,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 ## 🖼️ Send with an Inline Image
 
 ```bash
-./SendMail.sh   --to "user@example.com"   --subject "Server Status 🖥️"   --body "All systems running normally ✅"   --image "logo.png"
+./SendMail   --to "user@example.com"   --subject "Server Status 🖥️"   --body "All systems running normally ✅"   --image "logo.png"
 ```
 
 > 📎 The image will be included in the email and can appear in the email body (depending on the email client).
@@ -37,7 +37,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 ## 📎 Send with an Attachment
 
 ```bash
-./SendMail.sh   --to "user@example.com"   --subject "Daily Log 🧾"   --body "Here is the daily system log:\n\nRegards,\nServer01"   --attach "/var/log/syslog.txt"
+./SendMail   --to "user@example.com"   --subject "Daily Log 🧾"   --body "Here is the daily system log:\n\nRegards,\nServer01"   --attach "/var/log/syslog.txt"
 ```
 
 ---
@@ -45,7 +45,7 @@ A simple Bash script to send emails via `sendmail` with support for **emoji**, *
 ## 🧩 Send a Complete Email (Inline Image + Attachment)
 
 ```bash
-./SendMail.sh   --to "user@example.com"   --subject "Backup Report 🗂️"   --body "The backup process has finished 🚀\n\nRegards,\nServer01"   --image "/opt/icons/server.png"   --attach "/var/log/backup.log"
+./SendMail   --to "user@example.com"   --subject "Backup Report 🗂️"   --body "The backup process has finished 🚀\n\nRegards,\nServer01"   --image "/opt/icons/server.png"   --attach "/var/log/backup.log"
 ```
 
 ---
