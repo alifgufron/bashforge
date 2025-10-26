@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
 
-# Script created by alif
-# updated at 2025-10-19
+# MIT License
+#
+# Copyright (c) 2025 alifgufron
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
-# A robust script to back up InfluxDB databases with locking, pre-flight checks,
-# and detailed email notifications.
+
 
 set -euo pipefail
 
@@ -20,7 +38,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 # --- Global Variables ---
 readonly LOG_DIR="${LOG_DIR:-/var/log/custom}"
 readonly HOSTNAME=$(hostname)
-readonly TODAY=$(date +%Y-%m-%d)
+readonly TODAY=$(date +%Y%m%d)
 
 # Detect if running in an interactive terminal
 IS_INTERACTIVE=false
@@ -40,6 +58,9 @@ declare -A FAILED_DB_ERRORS
 declare -A DB_SIZES_PRE_COMPRESS
 declare -A DB_SIZES_POST_COMPRESS
 declare -A DB_ARCHIVE_PATHS
+
+# --- Global Result for Cleanup --- 
+declare -A DELETED_FILES_BY_DB_INFLUX=()
 
 ################################################################################
 # CORE FUNCTIONS
@@ -61,20 +82,49 @@ log() {
     fi
 }
 
-get_backup_filepath() {
+get_final_backup_base_dir() {
+    if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+        # PATH_TO_BACKUP/HOST/YEAR/{backup_name}
+        echo "${BACKUP_DIR_BASE}/${HOST}/${TODAY:0:4}"
+    else
+        # PATH_TO_BACKUP/HOST/YEAR/MONTH/DATE/{backup_name}
+        echo "${BACKUP_DIR_BASE}/${HOST}/${TODAY:0:4}/${TODAY:4:2}/${TODAY:6:2}"
+    fi
+}
+
+get_influx_backup_name() {
     local db_name=$1
-    local comp_ext=$2 # e.g., .tar.gz
-    local year
-    year=$(date +%Y)
-    local unique_id
-    unique_id=$(mktemp -u XXXXXX) # 6 random characters
+    local compress_backup=$2 # "yes" or "no"
+    local unique_id_enabled=$3 # "yes" or "no"
+    local retention_count=$4 # 0 or >0
 
-    # Use HOST variable from config, which should be sanitized or simple
-    local final_dir="${BACKUP_DIR_BASE}/${HOST}/${year}"
-    # Ensure the directory exists
-    mkdir -p "$final_dir"
+    local filename_base="${db_name}"
+    local unique_id_suffix=""
+    local extension=""
 
-    echo "${final_dir}/${db_name}-${TODAY}_${unique_id}${comp_ext}"
+    # Determine unique ID suffix
+    if [[ "$unique_id_enabled" == "yes" ]]; then
+        unique_id_suffix="-$(date +%H%M%S)"
+        filename_base+="-${TODAY}"
+    else # UNIQUE_ID_ENABLED="no"
+        # If no unique ID, and not compressed, and retention is active, append date to name
+        if [[ "$compress_backup" == "no" && "$retention_count" -gt 0 ]]; then
+            filename_base+="-${TODAY}"
+        fi
+    fi
+
+    if [[ "$compress_backup" == "yes" ]]; then
+        case "${COMPRESSION_TYPE,,}" in
+            gzip) extension=".tar.gz" ;;
+            bzip2) extension=".tar.bz2" ;;
+            xz) extension=".tar.xz" ;;
+            zstd) extension=".tar.zst" ;;
+            *) log "WARN: Unsupported COMPRESSION_TYPE: '${COMPRESSION_TYPE}'. Defaulting to .tar.gz"; extension=".tar.gz" ;;
+        esac
+        echo "${filename_base}${unique_id_suffix}${extension}"
+    else # Uncompressed backup (directory)
+        echo "${filename_base}${unique_id_suffix}"
+    fi
 }
 
 # --- Locking ---
@@ -260,6 +310,12 @@ validate_config() {
         has_error=1
     fi
 
+    # Check 6: UNIQUE_ID_ENABLED
+    if [[ "${UNIQUE_ID_ENABLED,,}" != "yes" && "${UNIQUE_ID_ENABLED,,}" != "no" ]]; then
+        log "FATAL: Configuration error: UNIQUE_ID_ENABLED must be 'yes' or 'no'."
+        has_error=1
+    fi
+
     if [[ $has_error -eq 1 ]]; then
         log "FATAL: Script aborted due to configuration errors."
         exit 1
@@ -272,23 +328,22 @@ validate_config() {
 
 compress_single_backup() {
     local db_name=$1
-    local db_backup_path=$2
+    local temp_db_backup_path=$2 # This is the temporary directory created by influxd backup
 
-    # Get pre-compression size
+    # Get pre-compression size (size of the temporary directory)
     local pre_compress_size
-    pre_compress_size=$(du -sh "$db_backup_path" | awk '{print $1}')
+    pre_compress_size=$(du -sh "$temp_db_backup_path" | awk '{print $1}')
     DB_SIZES_PRE_COMPRESS["$db_name"]=$pre_compress_size
 
-    if [[ "${COMPRESS_BACKUP,,}" != "yes" ]]; then
-        DB_SIZES_POST_COMPRESS["$db_name"]="N/A (Compression disabled)"
-        # When not compressing, the final backup is the temporary directory itself, which is now in the correct structure
-        DB_ARCHIVE_PATHS["$db_name"]=$db_backup_path
-        
-        # Log the final location of the uncompressed backup
-        log "INFO: Uncompressed backup for '$db_name' saved to: $db_backup_path"
-        return
-    fi
+    local final_base_dir
+    final_base_dir=$(get_final_backup_base_dir "${UNIQUE_ID_ENABLED,,}")
+    mkdir -p "$final_base_dir" # Ensure it exists
 
+    local final_backup_name
+    final_backup_name=$(get_influx_backup_name "$db_name" "yes" "${UNIQUE_ID_ENABLED,,}" "$RETENTION_COUNT") # Always "yes" for compress_backup here
+    local final_backup_path="${final_base_dir}/${final_backup_name}"
+
+    # --- Handle Compressed Backup ---
     local comp_type=${COMPRESSION_TYPE,,}
     local archive_ext=""
     local tar_opts=""
@@ -302,33 +357,39 @@ compress_single_backup() {
         *) log "ERROR: Unsupported COMPRESSION_TYPE: '$comp_type'. Skipping compression for $db_name."; return ;;
     esac
 
-    # Get the new unique archive path
-    local archive_path
-    archive_path=$(get_backup_filepath "$db_name" "$archive_ext")
-    DB_ARCHIVE_PATHS["$db_name"]=$archive_path
+    # The final_backup_name already includes the extension from get_influx_backup_name
+    # So, final_backup_path is already the full path with extension
+    DB_ARCHIVE_PATHS["$db_name"]=$final_backup_path
 
-    log "INFO: Compressing backup for '$db_name' with '$comp_type' to: $archive_path"
+    log "INFO: Compressing backup for '$db_name' with '$comp_type' to: $final_backup_path"
+
+    # If UNIQUE_ID_ENABLED is 'no', we expect to overwrite. Remove existing file if any.
+    if [[ "${UNIQUE_ID_ENABLED,,}" == "no" && -f "$final_backup_path" ]]; then
+        log "INFO: Overwriting existing compressed backup: $final_backup_path"
+        rm -f "$final_backup_path"
+    fi
 
     local compress_success=0
     if [[ $use_pipe -eq 1 ]]; then
-        tar -cf - -C "$db_backup_path" . | "$comp_type" -o "$archive_path" && compress_success=1
+        tar -cf - -C "$temp_db_backup_path" . | "$comp_type" -o "$final_backup_path" && compress_success=1
     else
-        tar "$tar_opts" "$archive_path" -C "$db_backup_path" . && compress_success=1
+        tar "$tar_opts" "$final_backup_path" -C "$temp_db_backup_path" . && compress_success=1
     fi
 
     if [[ $compress_success -eq 1 ]]; then
         log "SUCCESS: Compression complete for $db_name."
         
-        # Get post-compression size
         local post_compress_size
-        post_compress_size=$(du -sh "$archive_path" | awk '{print $1}')
+        post_compress_size=$(du -sh "$final_backup_path" | awk '{print $1}')
         DB_SIZES_POST_COMPRESS["$db_name"]=$post_compress_size
 
-        log "INFO: Removing original backup directory for $db_name: $db_backup_path"
-        rm -rf "$db_backup_path"
+        log "INFO: Removing original temporary backup directory for $db_name: $temp_db_backup_path"
+        rm -rf "$temp_db_backup_path"
     else
-        log "ERROR: Compression failed for $db_name. The original directory will be kept."
+        log "ERROR: Compression failed for '$db_name'. The temporary directory '$temp_db_backup_path' will be kept for inspection."
         DB_SIZES_POST_COMPRESS["$db_name"]="Compression Failed"
+        FAILED_DBS+=("$db_name")
+        FAILED_DB_ERRORS["$db_name"]="Compression failed."
     fi
 }
 
@@ -338,36 +399,67 @@ backup_databases() {
     error_log=$(mktemp)
 
     for db in "${DATABASE[@]}"; do
-        # Ensure the base directory for this host/year exists
-        local final_base_dir="${BACKUP_DIR_BASE}/${HOST}/${TODAY:0:4}" # YYYY part of TODAY
+        local final_base_dir
+        final_base_dir=$(get_final_backup_base_dir "${UNIQUE_ID_ENABLED,,}")
         mkdir -p "$final_base_dir"
 
-        # Create a temporary directory for this specific DB backup within the final_base_dir
-        local temp_db_backup_path
-        temp_db_backup_path=$(mktemp -d "${final_base_dir}/${db}-${TODAY}-XXXXXX")
-        log "INFO: Backing up database '$db' to temporary path: $temp_db_backup_path"
+        local current_backup_target_path="" # This is the path influxd backup will write to
+        local final_backup_name=""
 
-        if influxd backup -portable -db "$db" -host "${HOST}:${BACKUP_PORT}" "$temp_db_backup_path" 2> "$error_log"; then
+        if [[ "${COMPRESS_BACKUP,,}" == "yes" ]]; then
+            # For compressed backups, influxd backup writes to a temporary directory
+            # The temporary directory name should still be unique to avoid conflicts
+            current_backup_target_path=$(mktemp -d "${final_base_dir}/${db}-${TODAY}-XXXXXX")
+            log "INFO: Backing up database '$db' to temporary path: $current_backup_target_path"
+        else
+            # For uncompressed backups, influxd backup writes directly to the final named directory
+            final_backup_name=$(get_influx_backup_name "$db" "${COMPRESS_BACKUP,,}" "${UNIQUE_ID_ENABLED,,}" "$RETENTION_COUNT")
+            current_backup_target_path="${final_base_dir}/${final_backup_name}"
+            mkdir -p "$current_backup_target_path" # Create the final directory
+            log "INFO: Backing up database '$db' directly to: $current_backup_target_path"
+        fi
+
+        if influxd backup -portable -db "$db" -host "${HOST}:${BACKUP_PORT}" "$current_backup_target_path" 2> "$error_log"; then
             log "SUCCESS: Backup for database '$db' completed."
             SUCCESS_DBS+=("$db")
-            compress_single_backup "$db" "$temp_db_backup_path"
+            
+            if [[ "${COMPRESS_BACKUP,,}" == "yes" ]]; then
+                # If compressed, call compress_single_backup to handle compression and final naming
+                compress_single_backup "$db" "$current_backup_target_path"
+            else
+                # If uncompressed, current_backup_target_path is already the final path
+                DB_ARCHIVE_PATHS["$db"]=$current_backup_target_path
+                DB_SIZES_PRE_COMPRESS["$db"]=$(du -sh "$current_backup_target_path" | awk '{print $1}')
+                DB_SIZES_POST_COMPRESS["$db"]="N/A (Compression disabled)"
+            fi
         else
             log "ERROR: Backup for database '$db' failed."
             FAILED_DBS+=("$db")
             FAILED_DB_ERRORS["$db"]=$(<"$error_log")
-            # Clean up the failed temporary directory
-            rm -rf "$temp_db_backup_path"
+            # Clean up the failed directory (whether temp or final)
+            rm -rf "$current_backup_target_path"
         fi
     done
     rm -f "$error_log"
 }
 
 cleanup_backups() {
-    log "INFO: Cleaning up old backups based on retention count of $RETENTION_COUNT..."
-    local host_backup_dir="${BACKUP_DIR_BASE}/${HOST}"
+    if [[ "$RETENTION_COUNT" -eq 0 ]]; then
+        log "INFO: RETENTION_COUNT is 0, cleanup process is disabled."
+        return
+    fi
 
-    if [[ ! -d "$host_backup_dir" ]]; then
-        log "INFO: Host backup directory not found at '$host_backup_dir'. Skipping cleanup."
+    if [[ "${UNIQUE_ID_ENABLED,,}" == "no" ]]; then
+        log "INFO: UNIQUE_ID_ENABLED is 'no', RETENTION_COUNT is ignored and cleanup process is disabled."
+        return
+    fi
+
+    log "INFO: Cleaning up old backups based on retention count of $RETENTION_COUNT..."
+    local host_backup_base_dir
+    host_backup_base_dir=$(get_final_backup_base_dir "${UNIQUE_ID_ENABLED,,}") # Use the new helper
+
+    if [[ ! -d "$host_backup_base_dir" ]]; then
+        log "INFO: Host backup directory not found at '$host_backup_base_dir'. Skipping cleanup."
         return
     fi
 
@@ -375,14 +467,35 @@ cleanup_backups() {
     for db in "${DATABASE[@]}"; do
         log "INFO: Applying retention for database: $db"
         
-        local all_backups=()
-        # Search recursively within the host's backup directory for files matching the db name
-        # Sort by modification time (newest first) before applying retention
-        while IFS= read -r; do
-            all_backups+=("$REPLY")
-        done < <(find "$host_backup_dir" -name "${db}-*" -type f -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2-)
+        local find_pattern=""
+        local find_command=""
 
-        local backup_count=${#all_backups[@]}
+        if [[ "${COMPRESS_BACKUP,,}" == "yes" ]]; then
+            if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                find_pattern="${db}-*-*.tar.*" # Matches db-YYYYMMDD-HHMMSS.tar.gz
+            else
+                find_pattern="${db}-*.tar.*" # Matches db-YYYYMMDD.tar.gz
+            fi
+            find_command="find \"$host_backup_base_dir\" -name \"$find_pattern\" -type f"
+        else # Uncompressed backup (directory)
+            # For uncompressed, UNIQUE_ID_ENABLED is 'yes' here (due to early return if 'no')
+            find_pattern="${db}-*-*" # Matches db-YYYYMMDD-HHMMSS
+            find_command="find \"$host_backup_base_dir\" -name \"$find_pattern\" -type d"
+        fi
+
+        local all_backup_paths_raw=()
+        mapfile -t all_backup_paths_raw < <(eval "$find_command")
+
+        local all_backups_sorted_by_time=()
+        if [[ ${#all_backup_paths_raw[@]} -gt 0 ]]; then
+            local stat_command_pipeline=""
+            for path in "${all_backup_paths_raw[@]}"; do
+                stat_command_pipeline+="stat -f \"%m %N\" \"$path\"; "
+            done
+            mapfile -t all_backups_sorted_by_time < <(eval "$stat_command_pipeline" | sort -rn | awk '{print $2}')
+        fi
+
+        local backup_count=${#all_backups_sorted_by_time[@]}
         log "INFO: Found $backup_count total backups for database: $db"
 
         if [[ $backup_count -le $RETENTION_COUNT ]]; then
@@ -390,15 +503,18 @@ cleanup_backups() {
             continue
         fi
 
-        # Get the backups to delete (all except the first RETENTION_COUNT newest ones)
-        local backups_to_delete=("${all_backups[@]:$RETENTION_COUNT}")
+        local backups_to_delete=("${all_backups_sorted_by_time[@]:$RETENTION_COUNT}")
 
-        log "INFO: The following ${#backups_to_delete[@]} old backups for $db will be deleted:"
         for backup_file in "${backups_to_delete[@]}"; do
-            log "  - $backup_file"
+            if [[ -n "$backup_file" ]]; then
+                log "INFO: Deleting old backup: $backup_file"
+                if rm -rf "$backup_file"; then
+                    DELETED_FILES_BY_DB_INFLUX["$db"]+="$(basename "$backup_file") "
+                else
+                    log "ERROR: Failed to delete old backup: $backup_file"
+                fi
+            fi
         done
-
-        printf "%s\0" "${backups_to_delete[@]}" | xargs -0 rm -rf
         log "INFO: Cleanup finished for $db."
     done
 }
@@ -416,19 +532,17 @@ send_mail() {
     local mail_file
     mail_file=$(mktemp)
 
-    # Encode Subject for UTF-8/emoji support
-    local encoded_subject="=?UTF-8?B?$(echo -n "$subject_line" | base64)?="
-
-    # Build the email with MIME headers and plain text content
-    {
+    # The subject is passed directly; modern MTAs can handle UTF-8.
+    # The body is printed with printf for robust handling of newlines.
+    { 
         echo "From: $from_address";
         echo "To: $to_address";
-        echo "Subject: $encoded_subject";
+        echo "Subject: $subject_line";
         echo "MIME-Version: 1.0";
         echo "Content-Type: text/plain; charset=UTF-8";
         echo "Content-Transfer-Encoding: 8bit";
         echo "";
-        echo -e "$body_content";
+        printf "%b" "$body_content";
     } > "$mail_file"
 
     # Send the email using input redirection from the temp file
@@ -440,14 +554,13 @@ send_mail() {
 
     rm -f "$mail_file"
 }
-
 send_start_notification() {
     if [[ "${NOTIFY_ON_START,,}" != "yes" ]]; then
         return
     fi
     
     # Emoticon: 🚀
-    local subject="🚀 [Backup Started] InfluxDB Backup on $HOST"
+    local subject="🚀 [Backup InfluxDb Started] Report for: $HOST - From $HOSTNAME"
     local from="${MAIL_FROM:-influxdb-backup@$HOSTNAME}"
     
     local body="The InfluxDB backup process has started at $(date '+%Y-%m-%d %H:%M:%S').\n\n"
@@ -464,15 +577,16 @@ send_start_notification() {
 send_report() {
     local status_msg=$1
     local elapsed_time=$2
-    local host_backup_dir="${BACKUP_DIR_BASE}/${HOST}"
+    local host_backup_base_dir
+    host_backup_base_dir=$(get_final_backup_base_dir "${UNIQUE_ID_ENABLED,,}") # Use the new helper
     
     log "INFO: Total duration: $elapsed_time"
 
     local subject=""
     if [[ "$status_msg" == "SUCCESS" ]]; then
-        subject="✅ [Backup $status_msg] InfluxDB Backup on $HOST"
+        subject="✅ [Backup InfluxDB] Report for: $HOST - From $HOSTNAME - Status [SUCCESS]"
     else
-        subject="❌ [Backup $status_msg] InfluxDB Backup on $HOST"
+        subject="❌ [Backup InfluxDB] Report for: $HOST - From $HOSTNAME - Status [FAILED]"
     fi
 
     local from="${MAIL_FROM:-influxdb-backup@$HOSTNAME}"
@@ -486,41 +600,83 @@ send_report() {
         body+="Successful Backups:\n"
         for db in "${SUCCESS_DBS[@]}"; do
             body+="- 📦 database $db\n"
-            body+="  - Size (uncompressed): ${DB_SIZES_PRE_COMPRESS[$db]:-N/A}\n"
-            body+="  - Size (compressed): ${DB_SIZES_POST_COMPRESS[$db]:-N/A}\n"
-            body+="  - filename: $(basename "${DB_ARCHIVE_PATHS[$db]}")\n\n"
+            if [[ "${COMPRESS_BACKUP,,}" == "yes" ]]; then
+                body+="  - Size (uncompressed): ${DB_SIZES_PRE_COMPRESS[$db]:-N/A}\n"
+                body+="  - Size (compressed): ${DB_SIZES_POST_COMPRESS[$db]:-N/A}\n"
+            else
+                body+="  - Size: ${DB_SIZES_PRE_COMPRESS[$db]:-N/A}\n"
+            fi
+            body+="  - filename: $(basename "${DB_ARCHIVE_PATHS[$db]}")\n"
+            body+="  - Location: $(dirname "${DB_ARCHIVE_PATHS[$db]}")\n"
 
-            # --- Get Old Backup List & Total Size ---
-            local all_db_backups=()
-            if [[ -d "$host_backup_dir" ]]; then
-                # Find files, print mod_time + path, sort by time, then cut to get only the path.
-                while IFS= read -r; do
-                    all_db_backups+=("$REPLY")
-                done < <(find "$host_backup_dir" -name "${db}-*" -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2-)
+            # --- Old Backup List --- 
+            # Only show Old Backup List if RETENTION_COUNT is active and UNIQUE_ID_ENABLED is 'yes'
+            if [[ "$RETENTION_COUNT" -gt 0 && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                local all_backup_paths_raw=()
+                local find_pattern=""
+                local find_command=""
+
+                if [[ "${COMPRESS_BACKUP,,}" == "yes" ]]; then
+                    if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                        find_pattern="${db}-*-*.tar.*" # Matches db-YYYYMMDD-HHMMSS.tar.gz
+                    else
+                        find_pattern="${db}-*.tar.*" # Matches db-YYYYMMDD.tar.gz
+                    fi
+                    find_command="find \"$host_backup_base_dir\" -name \"$find_pattern\" -type f"
+                else # Uncompressed backup (directory)
+                    find_pattern="${db}-*-*" # Matches db-YYYYMMDD-HHMMSS
+                    find_command="find \"$host_backup_base_dir\" -name \"$find_pattern\" -type d"
+                fi
+
+                if [[ -d "$host_backup_base_dir" ]]; then
+                    mapfile -t all_backup_paths_raw < <(eval "$find_command")
+                fi
+
+                local all_backups_sorted_by_time=()
+                if [[ ${#all_backup_paths_raw[@]} -gt 0 ]]; then
+                    local stat_command_pipeline=""
+                    for path in "${all_backup_paths_raw[@]}"; do
+                        stat_command_pipeline+="stat -f \"%m %N\" \"$path\"; "
+                    done
+                    mapfile -t all_backups_sorted_by_time < <(eval "$stat_command_pipeline" | sort -rn | awk '{print $2}')
+                fi
+
+                if [[ ${#all_backups_sorted_by_time[@]} -gt 0 ]]; then
+                    body+="\n  🗃️ Old Backup List (newest first):\n"
+                    local recent_backups=("${all_backups_sorted_by_time[@]:0:3}")
+                    for backup_file in "${recent_backups[@]}"; do
+                        if [[ -f "$backup_file" || -d "$backup_file" ]]; then # Check if file or directory
+                            local m_date
+                            m_date=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$backup_file")
+                            
+                            local file_size
+                            file_size=$(du -sh "$backup_file" | awk '{print $1}')
+
+                            body+="  - $m_date $(basename "$backup_file") $file_size\n"
+                        fi
+                    done
+                    body+="\n"
+                fi
             fi
 
-            if [[ ${#all_db_backups[@]} -gt 0 ]]; then
-                body+="  🗃️ Old Backup List (newest first):\n"
-                local recent_backups=("${all_db_backups[@]:0:3}")
-                for backup_file in "${recent_backups[@]}"; do
-                    if [[ -f "$backup_file" ]]; then # Ensure it's a file
-                        # Get file modification time (BSD stat)
-                        local m_date
-                        m_date=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$backup_file")
-                        
-                        # Get human-readable file size
-                        local file_size
-                        file_size=$(du -h "$backup_file" | awk '{print $1}')
-
-                        body+="  - $m_date $(basename "$backup_file") $file_size\n"
-                    fi
+            # Add Deleted Old File section
+            if [[ -v "DELETED_FILES_BY_DB_INFLUX[$db]" && -n "${DELETED_FILES_BY_DB_INFLUX[$db]}" ]]; then
+                body+="  🗑️ Deleted Old File\n"
+                for deleted_file in ${DELETED_FILES_BY_DB_INFLUX[$db]}; do
+                    body+="  - $deleted_file\n"
                 done
                 body+="\n"
+            fi
 
-                local total_size
-                total_size=$(printf "%s\0" "${all_db_backups[@]}" | xargs -0 du -ch | tail -1 | awk '{print $1}')
-                body+="  💾 Total size all backups for $db\n"
-                body+="   - Size : ${total_size:-0B}\n"
+            # --- Total Size --- 
+            # Only show Total size if RETENTION_COUNT is active and UNIQUE_ID_ENABLED is 'yes'
+            if [[ "$RETENTION_COUNT" -gt 0 && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
+                if [[ ${#all_backups_sorted_by_time[@]} -gt 0 ]]; then
+                    local total_size
+                    total_size=$(printf "%s\0" "${all_backups_sorted_by_time[@]}" | xargs -0 du -ch | tail -1 | awk '{print $1}')
+                    body+="  💾 Total size all backups for $db\n"
+                    body+="   - Size : ${total_size:-0B}\n"
+                fi
             fi
             # Add a separator for readability between databases
             body+="\n-------------------------------------\n"
@@ -552,9 +708,20 @@ send_report() {
 ################################################################################
 
 main_backup() {
-    # --- Config & Environment Setup for Backup ---
-    local config_file_arg="${1:-backup-influx.conf}"
-    local config_file="${SCRIPT_DIR}/${config_file_arg}"
+    if [ -z "${1:-}" ]; then
+        echo "FATAL: No configuration file specified."
+        echo "Usage: $0 /path/to/your/config.conf"
+        exit 1
+    fi
+    local config_file_arg="$1"
+    local config_file=""
+    if [[ "$config_file_arg" == /* ]]; then
+        # Argument is an absolute path
+        config_file="$config_file_arg"
+    else
+        # Argument is a relative path, prepend script directory
+        config_file="${SCRIPT_DIR}/${config_file_arg}"
+    fi
 
     if [[ ! -f "$config_file" ]]; then
         echo "FATAL: Configuration file not found at: $config_file"
@@ -623,8 +790,21 @@ main_backup() {
 
 main_restore() {
     # --- Config & Environment Setup for Restore ---
-    local config_file_arg="${1:-backup-influx.conf}"
-    local config_file="${SCRIPT_DIR}/${config_file_arg}"
+    if [ -z "${1:-}" ]; then
+        # Can't use log function yet as LOG_FILE is not set.
+        echo "FATAL: No configuration file specified for restore."
+        echo "Usage: $0 restore /path/to/your/config.conf"
+        exit 1
+    fi
+    local config_file_arg="$1"
+    local config_file=""
+    if [[ "$config_file_arg" == /* ]]; then
+        # Argument is an absolute path
+        config_file="$config_file_arg"
+    else
+        # Argument is a relative path, prepend script directory
+        config_file="${SCRIPT_DIR}/${config_file_arg}"
+    fi
 
     if [[ ! -f "$config_file" ]]; then
         # Can't use log function yet as LOG_FILE is not set.
@@ -761,7 +941,7 @@ main_restore() {
     rm -rf "$temp_restore_dir"
 }
 
-if [[ "$1" == "restore" ]]; then
+if [[ "${1:-}" == "restore" ]]; then
     shift
     main_restore "$@"
 else

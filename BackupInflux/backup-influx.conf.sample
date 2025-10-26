@@ -43,15 +43,23 @@ COMPRESS_BACKUP="yes"
 
 # Algorithm to use for compression. Affects speed and file size.
 # Options: "gzip" (fast, good), "bzip2" (slower, better), "xz" (slowest, best), "zstd" (very fast, good).
+# Only relevant if COMPRESS_BACKUP="yes".
 COMPRESSION_TYPE="gzip"
 
-# Unique IDs are always appended to backup filenames in this script.
-# Filenames will be like 'db_name-YYYY-MM-DD_UNIQUEID.tar.gz'.
+# Whether to append a unique timestamp ID to backup filenames and determine folder structure.
+# If "yes": Filenames will be like 'db_name-YYYYMMDD-HHMMSS.tar.gz' or 'db_name-YYYYMMDD-HHMMSS/'.
+#            Folder structure: PATH_BCKP/HOST/YEAR/{backup_name}.
+#            RETENTION_COUNT is active.
+# If "no":  Filenames will be like 'db_name-YYYYMMDD.tar.gz' or 'db_name-YYYYMMDD/'.
+#            Folder structure: PATH_BCKP/HOST/YEAR/MONTH/DATE/{backup_name}.
+#            RETENTION_COUNT is ignored (only one backup per day, which is overwritten).
+UNIQUE_ID_ENABLED="yes"
 
 # --- Retention ---
 # Number of recent backups to keep. Older backups will be deleted.
 # This is applied per database.
 # Set to 0 to disable cleanup entirely (no old backups will be deleted).
+# Note: This is ignored if UNIQUE_ID_ENABLED="no".
 RETENTION_COUNT=7
 
 # --- Pre-flight Checks ---

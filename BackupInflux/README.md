@@ -5,13 +5,20 @@ This Bash script provides a robust and flexible solution for backing up InfluxDB
 
 ## Key Features
 -   **Flexible Backup:** Automatically backs up all databases (with exclusions) or specific databases.
--   **Unique File Naming:** Each backup file is given a unique ID (`db_name-YYYY-MM-DD_UNIQUEID.tar.ext` or `db_name-YYYY-MM-DD-UNIQUEID/` for uncompressed) to support multiple backups within a day.
--   **Organized Directory Structure:** Backups are stored in a `HOST/YEAR/` structure for easy organization.
--   **Efficient Compression:** Uses `tar` and your chosen compression tool (`gzip`, `bzip2`, `xz`, `zstd`).
--   **Retention Management:** Automatically deletes old backups based on a configured count, sorted by modification time. Set `RETENTION_COUNT=0` to disable cleanup entirely.
+-   **Configurable Unique File Naming & Folder Structure:**
+    -   If `UNIQUE_ID_ENABLED="yes"`:
+        -   Each backup file/directory gets a unique timestamp ID (`db_name-YYYYMMDD-HHMMSS.tar.ext` or `db_name-YYYYMMDD-HHMMSS/`).
+        -   Organized in `HOST/YEAR/` structure.
+        -   `RETENTION_COUNT` is active for cleanup.
+    -   If `UNIQUE_ID_ENABLED="no"`:
+        -   Backup file/directory name is `db_name-YYYYMMDD.tar.ext` or `db_name-YYYYMMDD/`.
+        -   Organized in `HOST/YEAR/MONTH/DATE/` structure.
+        -   `RETENTION_COUNT` is ignored (only one backup per day, which is overwritten).
+-   **Efficient Compression:** Option to enable or disable compression (`COMPRESS_BACKUP`). Uses `tar` and your chosen compression tool (`gzip`, `bzip2`, `xz`, `zstd`).
+-   **Retention Management:** Automatically deletes old backups based on a configured count, sorted by modification time. Set `RETENTION_COUNT=0` to disable cleanup entirely. **Note:** As described above, `RETENTION_COUNT` is ignored if `UNIQUE_ID_ENABLED="no"`.
 -   **Configuration Validation:** Checks critical settings at startup to prevent failures.
 -   **Dependency Checks:** Ensures all necessary tools are available.
--   **Detailed Email Notifications:** Sends comprehensive backup status reports (start, success, failure) with file sizes, locations, and lists of old backups.
+-   **Detailed Email Notifications:** Sends comprehensive backup status reports (start, success, failure) with file sizes, locations, lists of old backups, and a list of **deleted old backups** (conditional on `UNIQUE_ID_ENABLED`).
 -   **Flexible Restore Functionality:** Allows easy selection and restoration of backups, supporting **both compressed archive files and uncompressed backup directories**.
 -   **Execution Mode Detection:** Adjusts console output when run interactively or via cron (INFO messages only in interactive console, ERROR/FATAL always).
 -   **Lock File:** Prevents simultaneous script execution.
@@ -26,10 +33,10 @@ This Bash script provides a robust and flexible solution for backing up InfluxDB
 -   Standard Linux/BSD utilities: `du`, `df`, `find`, `rm`, `tar`, `sort`, `cut`, `stat`, `basename`, `mktemp`, `base64`, `cp` (for uncompressed restore)
 
 ## Installation & Setup
-1.  **Clone Repository:** (If the script is in a repository)
+1.  **Clone Repository:**
     ```bash
-    git clone https://github.com/your-repo/BashScript4life.git
-    cd BashScript4life/BackupInflux
+    git clone https://github.com/alifgufron/bashforge.git
+    cd bashforge/BackupInflux
     ```
 2.  **Create Configuration File:** Copy the sample configuration file:
     ```bash
@@ -50,8 +57,9 @@ Some important parameters you need to adjust:
 -   `EXCLUDE_DATABASES`: Array of databases to exclude if `BACKUP_ALL_DATABASES="yes"`.
 -   `PATH_BCKP`: **Absolute directory** for storing backup files.
 -   `COMPRESS_BACKUP`: `yes` to compress, `no` to not compress.
--   `COMPRESSION_TYPE`: `gzip`, `bzip2`, `xz`, or `zstd`.
--   `RETENTION_COUNT`: Number of backups to keep (0 to disable cleanup).
+-   `COMPRESSION_TYPE`: `gzip`, `bzip2`, `xz`, or `zstd`. **Only relevant if `COMPRESS_BACKUP="yes"`.**
+-   `UNIQUE_ID_ENABLED`: `yes` to append unique timestamp IDs to filenames and use `HOST/YEAR/` folder structure. `no` to use `HOST/YEAR/MONTH/DATE/` folder structure and overwrite daily backups (ignoring `RETENTION_COUNT`).
+-   `RETENTION_COUNT`: Number of backups to keep (0 to disable cleanup). **Note:** This is ignored if `UNIQUE_ID_ENABLED="no"`.
 -   `MIN_DISK_SPACE_GB`: Minimum required free disk space.
 -   `MAIL_TO`, `MAIL_FROM`, `NOTIFY_ON_START`: Email notification settings.
 
