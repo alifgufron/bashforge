@@ -38,7 +38,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 3.  **Edit Configuration:** Open `mysql-backup.conf` with your favorite text editor and adjust parameters according to your MySQL environment. Ensure `BACKUP_PATH` is a valid and writable directory.
 4.  **Set Permissions:** Make sure the script is executable:
     ```bash
-    chmod +x BackupMysql.sh
+    chmod +x BackupMysql
     ```
 
 ## Configuration (`mysql-backup.conf`)
@@ -61,7 +61,7 @@ Some important parameters you need to adjust:
 ### Performing a Backup
 Run the script by providing your configuration file:
 ```bash
-./BackupMysql.sh mysql-backup.conf
+./BackupMysql mysql-backup.conf
 ```
 If you do not provide a configuration file name, the script will look for `mysql-backup.conf` by default.
 
