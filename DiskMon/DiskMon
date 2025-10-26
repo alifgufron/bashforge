@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
+
+# MIT License
 #
-# harddisk_monitor.sh v3.2 (Robust Parsing)
-# Script to monitor hard disk health using smartctl and send email reports.
-# Handles SATA (atacam/sat), NVMe, and MegaRAID with specific commands.
-# Corrected SATA command: uses 'smartctl -a /dev/adaX' directly.
-# Added robustness to prevent script stoppage on parsing errors.
+# Copyright (c) 2025 alifgufron
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ---
+
 set -euo pipefail
+
+# Ensure the shell environment is UTF-8 aware
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
 
 # --- Configuration ---
 LOG_FILE="/var/log/harddisk_monitor.log"
@@ -16,8 +38,8 @@ REQUIRE_SMARTCTL=true # Set to 'false' to skip SMART checks if smartctl is not a
 # REPORT_EMAIL_TO="your_email@example.com" # Replace with the recipient email address
 # REPORT_EMAIL_FROM="monitor@yourdomain.com" # Replace with the sender email address
 REPORT_EMAIL_TO="admin@example.net"
-REPORT_EMAIL_FROM="noreply@monitoring.net"
-EMAIL_SUBJECT_PREFIX="[DiskMon Report]"
+REPORT_EMAIL_FROM="disk-monitoring@$(hostname)"
+EMAIL_SUBJECT_PREFIX="[Disk Monitoring]"
 
 # --- SMART Attributes ---
 # If these attributes have a RAW_VALUE > 0, a warning will be triggered.
@@ -120,36 +142,29 @@ detect_disks() {
 
 send_email_report() {
     # Sends the final report via sendmail.
-    subject="$1"
-    body="$2"
-    boundary="===BOUNDARY_$(date +%s)_$$="
-    mailfile=$(mktemp)
+    local subject="$1"
+    local body="$2"
+    local boundary="===BOUNDARY_$(date +%s)_$$==="
+    local mailfile=$(mktemp)
     if [ -z "$mailfile" ] || [ ! -f "$mailfile" ]; then
         log_message "FATAL: Failed to create temporary file for email."
         return 1
     fi
     log_message "Sending email report with subject: $subject"
-    # Use raw subject for direct readability
-    final_subject="$subject"
     # Build email headers and body
     {
         echo "From: ${REPORT_EMAIL_FROM}"
         echo "To: ${REPORT_EMAIL_TO}"
-        echo "Subject: ${final_subject}"
+        echo "Subject: ${subject}"
         echo "MIME-Version: 1.0"
-        echo "Content-Type: multipart/mixed; boundary=\"${boundary}\""
-        echo ""
-        echo "--${boundary}"
         echo "Content-Type: text/plain; charset=UTF-8"
-        echo "Content-Transfer-Encoding: 8bit"
         echo ""
-        echo -e "$body"
-        echo ""
-        echo "--${boundary}--"
+        printf "%b" "$body"
     } > "$mailfile"
 
     # Send the email
-    if sendmail -t < "$mailfile"; then
+    sendmail -t < "$mailfile"
+    if [ $? -eq 0 ]; then
         log_message "Email report sent successfully to $REPORT_EMAIL_TO."
     else
         log_message "ERROR: Failed to send email report."
@@ -225,6 +240,36 @@ run_smartctl_with_timeout() {
     return 0 # Indicate success
 }
 
+print_usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "Monitor hard disk health and send email reports."
+    echo ""
+    echo "Options:"
+    echo "  --mail-from <email>      Sender email address. Default: disk-monitoring@\$(hostname)"
+    echo "  --mail-to <email>        Recipient email address. Default: admin@example.net"
+    echo "  --smartctl <true|false>  Enable/disable SMART checks. Default: true"
+    echo "  --disk-threshold <0-100> Disk usage percentage to trigger a warning. Default: 90"
+    echo "  -h, --help               Display this help message."
+    echo ""
+    echo "Example:"
+    echo "  $0 --mail-from monitor@example.com --mail-to alerts@example.com --smartctl false --disk-threshold 85"
+}
+
+# Helper function to robustly get a raw SMART attribute value by its name.
+get_smart_attr_raw_value() {
+    local smart_output="$1"
+    local attr_name="$2"
+    local raw_value="0"
+    # Grep for the attribute name, case-insensitive, take the first match
+    local attr_line=$(printf '%s\n' "$smart_output" | grep -i -m1 "$attr_name" || true)
+    if [ -n "$attr_line" ]; then
+        # Attempt to extract the raw value, which is usually the last numeric token on the line.
+        raw_value=$(printf '%s\n' "$attr_line" | awk '{for(i=NF;i>=1;i--){ if ($i ~ /^[0-9]+$/){print $i; exit}}} ' || echo "0")
+    fi
+    # Default to 0 if not found or not a number
+    echo "${raw_value:-0}"
+}
+
 # --- Main Logic ---
 main() {
     # Detect if running in an interactive terminal
@@ -233,7 +278,52 @@ main() {
         IS_INTERACTIVE=1
     fi
 
-    # Check if required commands exist
+    # If no arguments are provided, display usage and exit.
+    if [ "$#" -eq 0 ]; then
+        log_message "INFO" "No arguments provided. Displaying usage and exiting."
+        print_usage
+        exit 1
+    fi
+
+    # --- Argument Parsing ---
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --mail-from)
+                REPORT_EMAIL_FROM="$2"
+                shift
+                ;;
+            --mail-to)
+                REPORT_EMAIL_TO="$2"
+                shift
+                ;;
+            --smartctl)
+                case "$(echo "$2" | tr '[:upper:]' '[:lower:]')" in
+                    true|1|yes) REQUIRE_SMARTCTL=true ;;
+                    false|0|no) REQUIRE_SMARTCTL=false ;;
+                    *) log_message "ERROR" "Invalid value for --smartctl: $2. Using default." ;;
+                esac
+                shift
+                ;;
+            --disk-threshold)
+                if [[ "$2" =~ ^[0-9]+$ ]] && (( "$2" >= 0 && "$2" <= 100 )); then
+                    DISK_USAGE_WARNING_THRESHOLD="$2"
+                else
+                    log_message "ERROR" "Invalid value for --disk-threshold: $2. Must be a number between 0 and 100. Using default."
+                fi
+                shift
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                log_message "WARN" "Unknown option: $1"
+                ;;
+        esac
+        shift
+    done
+
+    # --- Argument Parsing ---
     SMARTCTL_AVAILABLE=true
     if ! command_exists smartctl; then
         if [ "$REQUIRE_SMARTCTL" = "true" ]; then
@@ -511,10 +601,10 @@ main() {
                 else
                     DISK_TYPE="HDD"; INTERFACE="SATA/SAS"
                 fi
-                POWER_ON_HOURS=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "^[[:space:]]*9[[:space:]]+Power_On_Hours" | awk '{print $10}' || echo "0")
-                POWER_CYCLE_COUNT=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "^[[:space:]]*12[[:space:]]+Power_Cycle_Count" | awk '{print $10}' || echo "0")
-                TEMPERATURE=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -i "Temperature_Celsius" | awk '{print $10}' | sed 's/[^0-9].*//' || echo "0")
-                TOTAL_LBAS_WRITTEN=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "^[[:space:]]*241[[:space:]]+Total_LBAs_Written" | awk '{print $10}' || echo "0")
+                POWER_ON_HOURS=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_On_Hours")
+                POWER_CYCLE_COUNT=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_Cycle_Count")
+                TEMPERATURE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Temperature_Celsius")
+                TOTAL_LBAS_WRITTEN=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Total_LBAs_Written")
                 LOAD_CYCLE_COUNT="" # Initialize for non-HDD types
             fi
             FORM_FACTOR=${FORM_FACTOR:-"Unknown"}
@@ -567,6 +657,7 @@ main() {
                 REPORT_BODY+="✅ No SMART errors logged\n"
             else
                 REPORT_BODY+="⚠️ SMART Errors or Selftests present (see details)\n"
+                WARNING_COUNT=$((WARNING_COUNT + 1))
             fi
 
             # NVMe/SSD Specific Attributes
@@ -624,12 +715,7 @@ main() {
             else
                 # Check critical attributes for non-NVMe disks
                 for ATTR in "${CRITICAL_SMART_ATTRIBUTES[@]}"; do
-                    ATTR_LINE=$(printf '%s\n' "$SMART_OUTPUT" | grep -i "$ATTR" | head -n1 || true)
-                    ATTR_VALUE="0"
-                    if [ -n "$ATTR_LINE" ]; then
-                        # Attempt to extract the raw value, usually the last numeric token
-                        ATTR_VALUE=$(printf '%s\n' "$ATTR_LINE" | awk '{for(i=NF;i>=1;i--){ if ($i ~ /^[0-9]+$/){print $i; exit}}} ' || echo 0)
-                    fi
+                    ATTR_VALUE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "$ATTR")
                     if [ "$ATTR_VALUE" -gt 0 ]; then
                         WARNING_COUNT=$((WARNING_COUNT + 1))
                         REPORT_BODY+="  - ⚠️ $ATTR: $ATTR_VALUE (WARNING!)\n"
@@ -645,19 +731,25 @@ main() {
     fi
 
     # 3. Finalize and Send Report
-    FINAL_SUBJECT="$EMAIL_SUBJECT_PREFIX on $HOSTNAME - $(date '+%Y-%m-%d')"
+    local subject_prefix_with_emoji=""
+    local final_report_status=""
     REPORT_BODY+="\n=== Summary ===\n"
 
     if [ "$ERROR_COUNT" -gt 0 ]; then
-        FINAL_SUBJECT+=" - CRITICAL ($ERROR_COUNT Errors)"
+        subject_prefix_with_emoji="❌ [Disk Monitoring]"
+        final_report_status="CRITICAL ($ERROR_COUNT Errors)"
         REPORT_BODY+="CRITICAL: Found $ERROR_COUNT disk(s) with FAILED status and $WARNING_COUNT other warning(s).\n"
     elif [ "$WARNING_COUNT" -gt 0 ]; then
-        FINAL_SUBJECT+=" - WARNING ($WARNING_COUNT Warnings)"
+        subject_prefix_with_emoji="⚠️ [Disk Monitoring]"
+        final_report_status="WARNING ($WARNING_COUNT Warnings)"
         REPORT_BODY+="WARNING: Found $WARNING_COUNT warning(s) on disks (e.g., high attribute values or SMART disabled).\n"
     else
-        FINAL_SUBJECT+=" - OK"
+        subject_prefix_with_emoji="✅ [Disk Monitoring]"
+        final_report_status="OK"
         REPORT_BODY+="OK: All checked disks appear to be in good condition.\n"
     fi
+
+    FINAL_SUBJECT="$subject_prefix_with_emoji on $HOSTNAME - $(date '+%Y-%m-%d') - $final_report_status"
 
     send_email_report "$FINAL_SUBJECT" "$REPORT_BODY"
     log_message "INFO" "Hard disk check completed."
