@@ -216,7 +216,11 @@ get_tar_options() {
 
 backup_databases() {
     local dest_dir="$1"
-    local mysql_dump_opts=(-u"$MYSQL_USER" -p"$MYSQL_PASS" -h"$MYSQL_HOST" --single-transaction -R -K --triggers --set-gtid-purged=OFF)
+    local mysql_dump_opts=(-u"$MYSQL_USER" -p"$MYSQL_PASS" -h"$MYSQL_HOST")
+    # Append extra options from config if the variable is set. Word splitting is intentional.
+    if [[ -n "${MYSQLDUMP_EXTRA_OPTS:-}" ]]; then
+        mysql_dump_opts+=($MYSQLDUMP_EXTRA_OPTS)
+    fi
 
     for db in "${DATABASES[@]}"; do
         log "INFO: Backing up database '$db'..."
@@ -232,18 +236,24 @@ backup_databases() {
         local sql_file="${dest_dir}/${sql_filename}"
         
         if mysqldump "${mysql_dump_opts[@]}" "$db" > "$sql_file" 2>> "$LOG_FILE"; then
-            SUCCESS_DBS+=("$db")
-            local size
-            size=$(du -sh "$sql_file" | awk '{print $1}')
-            DB_SIZES_PRE_COMPRESS["$db"]=$size
+            log "INFO: Validating dump for '$db'..."
+            if tail -n 5 "$sql_file" | grep -q -- "-- Dump completed on"; then
+                SUCCESS_DBS+=("$db")
+                local size
+                size=$(du -sh "$sql_file" | awk '{print $1}')
+                DB_SIZES_PRE_COMPRESS["$db"]=$size
 
-            # If compression is disabled, the final archive path is this .sql file.
-            # We must set it here because this function determines the unique filename.
-            if [[ "${COMPRESSION_ENABLED,,}" == "no" ]]; then
-                DB_ARCHIVE_PATHS["$db"]=$sql_file
+                if [[ "${COMPRESSION_ENABLED,,}" == "no" ]]; then
+                    DB_ARCHIVE_PATHS["$db"]=$sql_file
+                fi
+
+                log "SUCCESS: Backup for database '$db' completed and validated ($size)."
+            else
+                FAILED_DBS+=("$db")
+                FAILED_DB_ERRORS["$db"]="mysqldump completed, but validation failed (missing 'Dump completed on' tag). See log for details."
+                log "ERROR: Backup for database '$db' failed validation."
+                rm -f "$sql_file" # Clean up failed dump
             fi
-
-            log "SUCCESS: Backup for database '$db' completed ($size)."
         else
             FAILED_DBS+=("$db")
             FAILED_DB_ERRORS["$db"]="mysqldump failed. See log for details."
@@ -556,6 +566,7 @@ send_report() {
         body+="Failed Backups:\n"
         for db in "${FAILED_DBS[@]}"; do body+="- $db: ${FAILED_DB_ERRORS[$db]}\n"; done
         body+="\n"
+        body+="For more details, please check the log file on the server:\n${LOG_FILE}\n\n"
     fi
 
     log "INFO: Sending final report to $MAIL_TO..."

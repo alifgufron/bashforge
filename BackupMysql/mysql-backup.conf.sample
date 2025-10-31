@@ -10,6 +10,10 @@ MYSQL_PASS="yourpassword"
 # MySQL host address (e.g., 127.0.0.1, localhost, or remote IP/hostname).
 MYSQL_HOST="127.0.0.1"
 
+# Extra options for mysqldump. Recommended for modern MySQL/MariaDB.
+# Adjust or remove options for older MySQL versions if needed.
+MYSQLDUMP_EXTRA_OPTS="--single-transaction -R -K --triggers --set-gtid-purged=OFF"
+
 # --- Backup Scope ---
 # Set to "yes" to automatically back up all databases found on the server.
 # If "no", the script will only back up the databases listed in the DATABASES array.
