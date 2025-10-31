@@ -15,9 +15,9 @@ A powerful script for backing up and restoring InfluxDB databases.
 
 ### 2. [BackupMysql](./BackupMysql/)
 
-A flexible script for backing up MySQL databases.
+A robust and highly configurable script for backing up MySQL databases.
 
-- **Features**: Supports different backup strategies (per database or per job), compression, retention, and email notifications.
+- **Features**: Flexible backup strategies (per database or per job), configurable compression (enabled/disabled), customizable `mysqldump` options for compatibility, intelligent retention policies, output validation for dump integrity, and detailed email notifications (including log file path on failure).
 - **Details**: See the [BackupMysql README](./BackupMysql/README.md) for full documentation.
 
 ### 3. [SendMail](./SendMail/)
