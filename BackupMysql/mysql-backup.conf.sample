@@ -10,8 +10,28 @@ MYSQL_PASS="yourpassword"
 # MySQL host address (e.g., 127.0.0.1, localhost, or remote IP/hostname).
 MYSQL_HOST="127.0.0.1"
 
-# Extra options for mysqldump. Recommended for modern MySQL/MariaDB.
-# Adjust or remove options for older MySQL versions if needed.
+# The command to use for mysqldump. Can be a name in PATH or an absolute path.
+# This is useful if you have multiple versions of mysqldump installed.
+# Example: MYSQLDUMP_CMD="mysqldump57"
+# Example: MYSQLDUMP_CMD="/usr/local/bin/mysqldump80"
+MYSQLDUMP_CMD="mysqldump"
+
+# Extra options for mysqldump. These are appended to the command.
+# The default options are recommended for modern MySQL/MariaDB with InnoDB tables.
+#
+# --single-transaction: Creates a consistent snapshot of InnoDB tables without locking them.
+#                         May not work for MyISAM tables.
+# -R, --routines:       Includes stored procedures and functions in the dump.
+# -K, --triggers:       Includes triggers for each dumped table.
+# --set-gtid-purged=OFF: Prevents GTID information from being added to the dump, which can
+#                        cause issues when restoring to a server that is not part of the
+#                        original replication setup. Remove if you are using GTID replication.
+#
+# Example for older MySQL 5.1 (without GTID support):
+# MYSQLDUMP_EXTRA_OPTS="--single-transaction -R -K --triggers"
+#
+# Example for a very basic dump (if you encounter errors):
+# MYSQLDUMP_EXTRA_OPTS=""
 MYSQLDUMP_EXTRA_OPTS="--single-transaction -R -K --triggers --set-gtid-purged=OFF"
 
 # --- Backup Scope ---

@@ -20,7 +20,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 ## Prerequisites
 -   Bash shell
 -   Accessible MySQL server
--   `mysqldump` and `mysql` CLI tools installed and available in PATH
+-   `mysqldump` and `mysql` CLI tools installed and available in PATH (the specific `mysqldump` command can be configured via `MYSQLDUMP_CMD`)
 -   `sendmail` configured for email delivery
 -   Your chosen compression tool (`gzip`, `bzip2`, `xz`)
 -   Standard Linux/BSD utilities: `du`, `df`, `find`, `rm`, `tar`, `sort`, `cut`, `stat`, `basename`, `mktemp`, `base64`
@@ -43,7 +43,9 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 
 ## Configuration (`mysql-backup.conf`)
 Some important parameters you need to adjust:
--   `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_HOST`: MySQL connection details.
+-   `MYSQL_HOST`: MySQL host address.
+-   `MYSQLDUMP_CMD`: The command or absolute path to the `mysqldump` executable to use (e.g., `mysqldump`, `mysqldump57`, `/usr/local/bin/mysqldump`).
+-   `MYSQLDUMP_EXTRA_OPTS`: Additional options passed directly to `mysqldump`. Useful for compatibility with different MySQL versions. Refer to the comments in `mysql-backup.conf.sample` for detailed examples.
 -   `BACKUP_ALL_DATABASES`: `yes` to back up all, `no` for specific databases.
 -   `DATABASES`: Array of specific databases if `BACKUP_ALL_DATABASES="no"`.
 -   `EXCLUDE_DATABASES`: Array of databases to exclude if `BACKUP_ALL_DATABASES="yes"`.

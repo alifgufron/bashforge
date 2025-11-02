@@ -137,7 +137,9 @@ validate_config() {
 check_deps() {
     log "INFO: Checking dependencies..."
     local missing_deps=0
-    local cmds=("mysqldump" "mysql" "sendmail" "du" "df" "find" "rm" "tar" "sort" "cut" "stat" "basename")
+    # Use the configured mysqldump command, default to "mysqldump" if not set.
+    local mysqldump_cmd_to_check="${MYSQLDUMP_CMD:-mysqldump}"
+    local cmds=("$mysqldump_cmd_to_check" "mysql" "sendmail" "du" "df" "find" "rm" "tar" "sort" "cut" "stat" "basename")
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             log "ERROR: Command not found: $cmd"
@@ -226,16 +228,18 @@ backup_databases() {
         log "INFO: Backing up database '$db'..."
         
         local sql_filename="${db}"
-        # If compression is disabled, this function is responsible for handling the unique ID.
-        # If compression is enabled, the compress_backups function will handle it.
         if [[ "${COMPRESSION_ENABLED,,}" == "no" && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
             sql_filename+="_$(mktemp -u XXXXXX)"
         fi
         sql_filename+=".sql"
         
         local sql_file="${dest_dir}/${sql_filename}"
-        
-        if mysqldump "${mysql_dump_opts[@]}" "$db" > "$sql_file" 2>> "$LOG_FILE"; then
+        local error_file
+        error_file=$(mktemp)
+
+        local mysqldump_cmd_to_run="${MYSQLDUMP_CMD:-mysqldump}"
+
+        if "$mysqldump_cmd_to_run" "${mysql_dump_opts[@]}" "$db" > "$sql_file" 2> "$error_file"; then
             log "INFO: Validating dump for '$db'..."
             if tail -n 5 "$sql_file" | grep -q -- "-- Dump completed on"; then
                 SUCCESS_DBS+=("$db")
@@ -250,16 +254,23 @@ backup_databases() {
                 log "SUCCESS: Backup for database '$db' completed and validated ($size)."
             else
                 FAILED_DBS+=("$db")
-                FAILED_DB_ERRORS["$db"]="mysqldump completed, but validation failed (missing 'Dump completed on' tag). See log for details."
+                FAILED_DB_ERRORS["$db"]="mysqldump succeeded, but validation failed (missing 'Dump completed on' tag)."
                 log "ERROR: Backup for database '$db' failed validation."
-                rm -f "$sql_file" # Clean up failed dump
+                rm -f "$sql_file"
             fi
         else
+            local error_details
+            error_details=$(<"$error_file")
+            # Clean up common prefixes to make the error more concise
+            error_details=${error_details//mysqldump: /}
+
             FAILED_DBS+=("$db")
-            FAILED_DB_ERRORS["$db"]="mysqldump failed. See log for details."
-            log "ERROR: Backup for database '$db' failed."
-            rm -f "$sql_file" # Clean up failed dump
+            FAILED_DB_ERRORS["$db"]="mysqldump failed: ${error_details}"
+            log "ERROR: Backup for database '$db' failed. Details: ${error_details}"
+            rm -f "$sql_file"
         fi
+        
+        rm -f "$error_file"
     done
 }
 
