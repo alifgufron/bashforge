@@ -98,52 +98,35 @@ detect_os() {
 # Detect disks based on the operating system
 detect_disks() {
     os_type="$1"
+    # Second argument can be a mode, e.g., "megaraid_only"
+    mode="${2:-normal}"
     disk_list=""
-    case "${os_type}" in
-        "bsd")
-            # BSD systems: use smartctl --scan
-            if command_exists smartctl; then
-                # Use smartctl --scan as the primary method for BSD
-                # This will find ada, da, nvme, and megaraid devices
-                while IFS= read -r line; do
-                    # Extract /dev/device from lines like '/dev/ada0 -d atacam # /dev/ada0, ATA device'
-                    # or '/dev/mfi0 -d megaraid,0 # /dev/mfi0 [megaraid_disk_00], SCSI device'
-                    # or '/dev/nvme0 -d nvme # /dev/nvme0, NVMe device'
-                    if echo "$line" | grep -qE '^/dev/'; then
-                        device_path=$(echo "$line" | awk '{print $1}')
-                        device_type_arg=$(echo "$line" | sed -E 's/^[^[:space:]]+[[:space:]]+-d[[:space:]]+([^[:space:]]+).*$/\1/' || true)
-                        if [ -n "$device_type_arg" ]; then
-                            # Format as /dev/device,type_arg (e.g., /dev/mfi0,megaraid,0 or /dev/nvme0,nvme)
-                            disk_list+="$device_path,$device_type_arg "
-                        else
-                            # For devices without -d argument (e.g., /dev/ada0 -d atacam -> treated as standard)
-                            disk_list+="$device_path "
-                        fi
-                    fi
-                done < <(smartctl --scan 2>/dev/null || true)
+
+    if command_exists smartctl; then
+        # Always scan all devices first
+        scan_output=$(smartctl --scan 2>/dev/null || true)
+
+        if [ "$mode" = "megaraid_only" ]; then
+            # In megaraid_only mode, only grab lines with 'megaraid'
+            scan_output=$(echo "$scan_output" | grep 'megaraid')
+        fi
+
+        while IFS= read -r line; do
+            # Skip empty lines or comments
+            if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+                continue
             fi
-            ;;
-        "linux")
-            # Linux systems: use smartctl --scan to avoid detecting virtual disks (e.g., ZFS volumes).
-            if command_exists smartctl; then
-                while IFS= read -r line; do
-                    if echo "$line" | grep -qE '^/dev/'; then
-                        device_path=$(echo "$line" | awk '{print $1}')
-                        device_type_arg=$(echo "$line" | sed -E 's/^[^[:space:]]+[[:space:]]+-d[[:space:]]+([^[:space:]]+).*$/\1/' || true)
-                        if [ -n "$device_type_arg" ]; then
-                            disk_list+="$device_path,$device_type_arg "
-                        else
-                            disk_list+="$device_path "
-                        fi
-                    fi
-                done < <(smartctl --scan 2>/dev/null || true)
+
+            device_path=$(echo "$line" | awk '{print $1}')
+            device_type_arg=$(echo "$line" | sed -E 's/^[^[:space:]]+[[:space:]]+-d[[:space:]]+([^[:space:]]+).*$/\1/' || true)
+
+            if [ -n "$device_type_arg" ]; then
+                disk_list+="$device_path,$device_type_arg "
+            else
+                disk_list+="$device_path "
             fi
-            ;;
-        *)
-            # Default to smartctl --scan for unknown systems
-            disk_list=$(smartctl --scan | grep '^\/dev\/' | awk '{print $1}' | sort -u)
-            ;;
-    esac
+        done <<< "$scan_output"
+    fi
     echo "$disk_list"
 }
 
@@ -181,71 +164,6 @@ send_email_report() {
     rm -f "$mailfile"
 }
 
-# Helper function to run smartctl with a custom timeout (specifically for MegaRAID)
-run_smartctl_with_timeout() {
-    local device_path="$1"
-    local smartctl_args="$2"
-    local timeout_seconds=10
-    local smart_output=""
-    local tmp_file=$(mktemp) # Create temp file internally
-    log_message "INFO" "Running smartctl for $device_path with custom timeout of $timeout_seconds seconds."
-    log_message "DEBUG" "Executing: smartctl -a $smartctl_args \"$device_path\" > \"$tmp_file\" 2>&1 &"
-
-    # Run smartctl in the background
-    smartctl -a $smartctl_args "$device_path" > "$tmp_file" 2>&1 &
-    local smartctl_pid=$!
-    log_message "DEBUG" "smartctl PID: $smartctl_pid"
-
-    # Wait for smartctl to finish, with a timeout
-    local elapsed_time=0
-    local interval=1 # Check every 1 second
-    local smartctl_finished=0
-    while [ "$elapsed_time" -lt "$timeout_seconds" ]; do
-        if ! kill -0 "$smartctl_pid" 2>/dev/null; then
-            # Process is no longer running
-            log_message "DEBUG" "smartctl PID $smartctl_pid finished."
-            smartctl_finished=1
-            break
-        fi
-        sleep "$interval"
-        elapsed_time=$((elapsed_time + interval))
-        log_message "DEBUG" "Waiting for smartctl PID $smartctl_pid. Elapsed: $elapsed_time s."
-    done
-
-    if [ "$smartctl_finished" -eq 0 ]; then
-        # smartctl is still running after timeout, kill it
-        log_message "ERROR" "smartctl for $device_path (PID $smartctl_pid) timed out after $timeout_seconds seconds. Attempting to kill."
-        kill -9 "$smartctl_pid" 2>/dev/null
-        log_message "DEBUG" "Sent KILL -9 to PID $smartctl_pid."
-        wait "$smartctl_pid" 2>/dev/null # Wait for it to be truly dead
-        log_message "DEBUG" "Wait for PID $smartctl_pid completed after KILL -9."
-        # Add error to report
-        REPORT_BODY+="  - ❌ Disk $device_path: smartctl timed out and was force-killed after $timeout_seconds seconds (ERROR!)\n"
-        ERROR_COUNT=$((ERROR_COUNT + 1))
-        rm -f "$tmp_file" # Clean up temp file
-        echo "" # Return empty string for SMART_OUTPUT
-        return 1 # Indicate failure
-    else
-        # smartctl finished within the timeout
-        wait "$smartctl_pid" # Get the actual exit code
-        local smartctl_exit_code=$?
-        log_message "DEBUG" "smartctl PID $smartctl_pid exited with code $smartctl_exit_code."
-        if [ "$smartctl_exit_code" -ne 0 ]; then
-            log_message "ERROR" "smartctl for $device_path failed with exit code $smartctl_exit_code."
-            REPORT_BODY+="  - ❌ Disk $device_path: smartctl failed with exit code $smartctl_exit_code (ERROR!)\n"
-            ERROR_COUNT=$((ERROR_COUNT + 1))
-            rm -f "$tmp_file" # Clean up temp file
-            echo "" # Return empty string for SMART_OUTPUT
-            return 1 # Indicate failure
-        fi
-    fi
-
-    # If successful, read the content and clean up
-    smart_output=$(cat "$tmp_file")
-    rm -f "$tmp_file" # Clean up temp file
-    echo "$smart_output" # Return the SMART output
-    return 0 # Indicate success
-}
 
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -401,11 +319,17 @@ main() {
 
     if [ "$REQUIRE_SMARTCTL" = "true" ]; then
         # 2. Detect and Check SMART-capable disks
-        log_message "INFO" "Scanning for disks using $OS_TYPE-specific methods..."
+        log_message "INFO" "Scanning for disks..."
         REPORT_BODY+="\n=== SMART Health Status ===\n"
 
-        # Detect disks based on OS
-        DISK_LIST=$(detect_disks "$OS_TYPE")
+        # Detect if a megaraid controller is present
+        if smartctl --scan | grep -q 'megaraid'; then
+            log_message "INFO" "MegaRAID controller detected. Focusing on megaraid devices only."
+            DISK_LIST=$(detect_disks "$OS_TYPE" "megaraid_only")
+        else
+            DISK_LIST=$(detect_disks "$OS_TYPE")
+        fi
+
         log_message "INFO" "Detected disks:\n$DISK_LIST"
 
         if [ -z "$DISK_LIST" ]; then
@@ -420,129 +344,73 @@ main() {
                     continue
                 fi
 
-                # --- 1. Parse device path and arguments (Corrected for SATA) ---
-                device_path="$disk_entry"
-                # smartctl_args is now only used for MegaRAID
-                smartctl_args=""
-                is_megaraid=0
-                is_nvme=0
-                # is_atacam_or_sat is now implicitly handled by the 'standard' command type
-                command_type="standard" # Default
-
-                if echo "$disk_entry" | grep -q ','; then
-                    device_path=$(echo "$disk_entry" | cut -d, -f1)
-                    type_arg_full=$(echo "$disk_entry" | cut -d, -f2-)
-                    if echo "$type_arg_full" | grep -q 'megaraid'; then
-                        is_megaraid=1
-                        smartctl_args="-d $type_arg_full"
-                        command_type="megaraid"
-                        log_message "DEBUG" "Parsed MegaRAID: $device_path with args $smartctl_args"
-                    elif echo "$type_arg_full" | grep -q 'nvme'; then
-                        is_nvme=1
-                        command_type="nvme"
-                        log_message "DEBUG" "Parsed NVMe: $device_path"
-                    # Note: Removed the atacam/sat branch here.
-                    # The type_arg_full (like 'atacam' or 'sat') is still parsed
-                    # but command_type remains 'standard', which means no additional -d args
-                    # will be passed to the smartctl command itself.
-                    # The type_arg_full is primarily used during parsing to distinguish disk types.
-                    else
-                        # Generic device type argument, treat as standard (e.g., for future types)
-                        command_type="standard"
-                        log_message "DEBUG" "Parsed Generic (Standard with type info): $device_path (type: $type_arg_full)"
-                    fi
-                elif echo "$disk_entry" | grep -q 'nvme'; then
-                     is_nvme=1
-                     command_type="nvme"
-                     log_message "DEBUG" "Parsed NVMe (no comma): $device_path"
-                # Standard disk without specific args (likely direct SATA)
-                else
-                     command_type="standard"
-                     log_message "DEBUG" "Parsed Standard Disk (no args): $device_path"
-                fi
-
-                # Skip if disk device does not exist
-                if [ ! -e "$device_path" ]; then
-                    log_message "WARN" "Disk device '$device_path' (from entry '$disk_entry') does not exist, skipping."
-                    continue
-                fi
-
-                log_message "INFO" "Checking disk: $disk_entry (Command type: $command_type)"
-
-                # --- 2. Execute smartctl based on determined type (Corrected SATA Command) ---
-                SMART_OUTPUT=""
-                TMP_SMART_FILE=$(mktemp)
-
-                case "$command_type" in
-                    "megaraid")
-                        # For MegaRAID, use the robust custom timeout function
-                        SMART_OUTPUT=$(run_smartctl_with_timeout "$device_path" "$smartctl_args")
-                        # run_smartctl_with_timeout handles its own errors and returns empty string on failure
-                        # If it fails, SMART_OUTPUT will be empty, and subsequent checks will likely fail.
-                        ;;
-                    "nvme")
-                        # For NVMe, call smartctl directly without -d args (usually)
-                        log_message "DEBUG" "Executing standard NVMe command: smartctl -a $device_path"
-                        smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                            local exit_code=$?
-                            log_message "ERROR" "smartctl command for NVMe $device_path failed (exit code $exit_code)."
-                            REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
-                            ERROR_COUNT=$((ERROR_COUNT + 1))
-                            rm -f "$TMP_SMART_FILE"
-                            continue # Skip processing this disk further
-                        }
-                        SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
-                        rm -f "$TMP_SMART_FILE"
-                        ;;
-                    "standard")
-                        # For SATA/ATA/ATACAM/SAT without additional -d args
-                        # The type information (atacam/sat) is used for parsing only, not for the command.
-                        log_message "DEBUG" "Executing standard command (no extra -d): smartctl -a $device_path"
-                        if [ "$OS_TYPE" = "bsd" ]; then
-                            if command_exists perl; then
-                                # Use perl alarm for BSD
-                                PERLDB_OPTS="" PERL5OPT="" PERL5DB="" perl -e 'alarm(30); system("smartctl", "-a", @ARGV);' "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                                    local perl_exit_code=$?
-                                    log_message "ERROR" "smartctl command for $device_path failed or timed out (perl exit code $perl_exit_code)."
-                                    REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $perl_exit_code) (ERROR!)\n"
-                                    ERROR_COUNT=$((ERROR_COUNT + 1))
-                                    rm -f "$TMP_SMART_FILE"
-                                    continue # Skip processing this disk further
-                                }
+                            # --- 1. Parse device path and arguments ---
+                            device_path="$disk_entry"
+                            smartctl_args=""
+                            is_megaraid=0
+                            is_nvme=0
+                            command_type="standard" # Default
+                
+                            if echo "$disk_entry" | grep -q ','; then
+                                device_path=$(echo "$disk_entry" | cut -d, -f1)
+                                type_arg_full=$(echo "$disk_entry" | cut -d, -f2-)
+                                if echo "$type_arg_full" | grep -q 'megaraid'; then
+                                    is_megaraid=1
+                                    smartctl_args="-d $type_arg_full"
+                                    command_type="megaraid"
+                                    log_message "DEBUG" "Parsed MegaRAID: $device_path with args $smartctl_args"
+                                elif echo "$type_arg_full" | grep -q 'nvme'; then
+                                    is_nvme=1
+                                    command_type="nvme" # No args needed for nvme type
+                                    log_message "DEBUG" "Parsed NVMe: $device_path"
+                                else
+                                    # Generic device type argument (e.g., scsi, atacam), pass it with -d
+                                    command_type="standard"
+                                    smartctl_args="-d $type_arg_full"
+                                    log_message "DEBUG" "Parsed Generic (e.g. SCSI/SATA): $device_path with args $smartctl_args"
+                                fi
+                            elif echo "$disk_entry" | grep -q 'nvme'; then
+                                 is_nvme=1
+                                 command_type="nvme"
+                                 log_message "DEBUG" "Parsed NVMe (no comma): $device_path"
+                            # Standard disk without specific args (likely direct SATA)
                             else
-                                # Fallback if perl is not available - run without timeout but check exit code
-                                smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                                    local exit_code=$?
-                                    log_message "ERROR" "smartctl command for $device_path failed (exit code $exit_code)."
-                                    REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
-                                    ERROR_COUNT=$((ERROR_COUNT + 1))
-                                    rm -f "$TMP_SMART_FILE"
-                                    continue # Skip processing this disk further
-                                }
+                                 command_type="standard"
+                                 log_message "DEBUG" "Parsed Standard Disk (no args): $device_path"
                             fi
-                        else # Linux
-                            # Use timeout for Linux
-                            timeout 30 smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                                local timeout_exit_code=$?
-                                log_message "ERROR" "smartctl command for $device_path failed or timed out (timeout exit code $timeout_exit_code)."
-                                REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $timeout_exit_code) (ERROR!)\n"
-                                ERROR_COUNT=$((ERROR_COUNT + 1))
-                                rm -f "$TMP_SMART_FILE"
-                                continue # Skip processing this disk further
-                            }
-                        fi
-                        SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
-                        rm -f "$TMP_SMART_FILE"
-                        ;;
-                    *)
-                        # Should not happen if logic above is correct
-                        log_message "ERROR" "Unknown command type '$command_type' for disk $disk_entry. Skipping."
-                        REPORT_BODY+="  - ❌ Disk $device_path: Unknown command type '$command_type' (ERROR!)\n"
-                        ERROR_COUNT=$((ERROR_COUNT + 1))
-                        continue
-                        ;;
-                esac
+                
+                                        # Skip if disk device does not exist (but allow directory paths for MegaRAID on Linux)
+                                        if [ "$is_megaraid" -eq 0 ] && [ ! -e "$device_path" ]; then                                log_message "WARN" "Disk device '$device_path' (from entry '$disk_entry') does not exist, skipping."
+                                continue
+                            fi
+                
+                            log_message "INFO" "Checking disk: $disk_entry (Command type: $command_type)"
+                
+                            # --- 2. Execute smartctl command (Unified for all types) ---
+            SMART_OUTPUT=""
 
+            log_message "DEBUG" "Executing command: timeout 30 smartctl -a $smartctl_args \"$device_path\""
+
+            # Primary attempt with suggested args
+            SMART_OUTPUT=$(timeout 30 smartctl -a $smartctl_args "$device_path" 2>/dev/null || true)
+
+            # If the primary attempt did not return a full SMART report and the type was 'scsi',
+            # try again without the device type arg. This handles both partial reads on FreeBSD
+            # and 'Unavailable' reports on Linux when `-d scsi` is incorrectly suggested.
+            if ! echo "$SMART_OUTPUT" | grep -q "SMART overall-health self-assessment test result:" && echo "$smartctl_args" | grep -q "scsi"; then
+                log_message "DEBUG" "Initial smartctl attempt with '$smartctl_args' did not return full results. Retrying without device type argument."
+                smartctl_args=""
+                SMART_OUTPUT=$(timeout 30 smartctl -a "$device_path" 2>/dev/null || true)
+            fi
+
+            # After potential retry, run final checks on the output.
+            # Check if the command produced any output at all.
+            if [ -z "$SMART_OUTPUT" ]; then
+                log_message "ERROR" "smartctl command for $device_path produced no output or timed out."
+                REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or produced no output (ERROR!)\n"
+                ERROR_COUNT=$((ERROR_COUNT + 1))
+                continue # Skip processing this disk further
+            fi
                 # --- 3. Check if SMART is available ---
                 # This section now relies on SMART_OUTPUT being populated correctly.
                 # If previous command failed and skipped using 'continue', this part won't run for that disk.
