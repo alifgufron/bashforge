@@ -124,12 +124,19 @@ detect_disks() {
             fi
             ;;
         "linux")
-            # Linux systems: use lsblk or smartctl --scan
-            if command_exists lsblk; then
-                disk_list=$(lsblk -r -o NAME,TYPE | grep -E "disk" | grep -v "loop\|ram\|sr" | awk '{print "\/dev\/" $1}')
-            elif command_exists smartctl; then
-                # Fallback to smartctl --scan
-                disk_list=$(smartctl --scan | grep '^\/dev\/' | awk '{print $1}' | sort -u)
+            # Linux systems: use smartctl --scan to avoid detecting virtual disks (e.g., ZFS volumes).
+            if command_exists smartctl; then
+                while IFS= read -r line; do
+                    if echo "$line" | grep -qE '^/dev/'; then
+                        device_path=$(echo "$line" | awk '{print $1}')
+                        device_type_arg=$(echo "$line" | sed -E 's/^[^[:space:]]+[[:space:]]+-d[[:space:]]+([^[:space:]]+).*$/\1/' || true)
+                        if [ -n "$device_type_arg" ]; then
+                            disk_list+="$device_path,$device_type_arg "
+                        else
+                            disk_list+="$device_path "
+                        fi
+                    fi
+                done < <(smartctl --scan 2>/dev/null || true)
             fi
             ;;
         *)
@@ -385,349 +392,351 @@ main() {
     done <<< "$(echo "$DF_OUTPUT" | tail -n +2)"
 
     if [ -n "$DISK_USAGE_WARNINGS" ]; then
-        REPORT_BODY+="=== Filesystem Usage Warnings ===\n"
+        REPORT_BODY+="\n=== Filesystem Usage Warnings ===\n"
         REPORT_BODY+="$DISK_USAGE_WARNINGS"
         REPORT_BODY+="\n" # Blank line
         # Count warnings and add to total WARNING_COUNT
         WARNING_COUNT=$((WARNING_COUNT + $(echo "$DISK_USAGE_WARNINGS" | grep -c "⚠️")))
     fi
 
-    # 2. Detect and Check SMART-capable disks
-    log_message "INFO" "Scanning for disks using $OS_TYPE-specific methods..."
-    REPORT_BODY+="=== SMART Health Status ===\n"
+    if [ "$REQUIRE_SMARTCTL" = "true" ]; then
+        # 2. Detect and Check SMART-capable disks
+        log_message "INFO" "Scanning for disks using $OS_TYPE-specific methods..."
+        REPORT_BODY+="\n=== SMART Health Status ===\n"
 
-    # Detect disks based on OS
-    DISK_LIST=$(detect_disks "$OS_TYPE")
-    log_message "INFO" "Detected disks:\n$DISK_LIST"
+        # Detect disks based on OS
+        DISK_LIST=$(detect_disks "$OS_TYPE")
+        log_message "INFO" "Detected disks:\n$DISK_LIST"
 
-    if [ -z "$DISK_LIST" ]; then
-        REPORT_BODY+="No disks detected on this system.\n"
-        log_message "INFO" "No disks detected."
-    else
-        # Check each disk
-        for disk_entry in $DISK_LIST; do
-            # Skip enclosure services devices
-            if echo "$disk_entry" | grep -qE '^/dev/ses'; then
-                log_message "INFO" "Skipping enclosure services device: $disk_entry"
-                continue
-            fi
-
-            # --- 1. Parse device path and arguments (Corrected for SATA) ---
-            device_path="$disk_entry"
-            # smartctl_args is now only used for MegaRAID
-            smartctl_args=""
-            is_megaraid=0
-            is_nvme=0
-            # is_atacam_or_sat is now implicitly handled by the 'standard' command type
-            command_type="standard" # Default
-
-            if echo "$disk_entry" | grep -q ','; then
-                device_path=$(echo "$disk_entry" | cut -d, -f1)
-                type_arg_full=$(echo "$disk_entry" | cut -d, -f2-)
-                if echo "$type_arg_full" | grep -q 'megaraid'; then
-                    is_megaraid=1
-                    smartctl_args="-d $type_arg_full"
-                    command_type="megaraid"
-                    log_message "DEBUG" "Parsed MegaRAID: $device_path with args $smartctl_args"
-                elif echo "$type_arg_full" | grep -q 'nvme'; then
-                    is_nvme=1
-                    command_type="nvme"
-                    log_message "DEBUG" "Parsed NVMe: $device_path"
-                # Note: Removed the atacam/sat branch here.
-                # The type_arg_full (like 'atacam' or 'sat') is still parsed
-                # but command_type remains 'standard', which means no additional -d args
-                # will be passed to the smartctl command itself.
-                # The type_arg_full is primarily used during parsing to distinguish disk types.
-                else
-                    # Generic device type argument, treat as standard (e.g., for future types)
-                    command_type="standard"
-                    log_message "DEBUG" "Parsed Generic (Standard with type info): $device_path (type: $type_arg_full)"
+        if [ -z "$DISK_LIST" ]; then
+            REPORT_BODY+="No disks detected on this system.\n"
+            log_message "INFO" "No disks detected."
+        else
+            # Check each disk
+            for disk_entry in $DISK_LIST; do
+                # Skip enclosure services devices
+                if echo "$disk_entry" | grep -qE '^/dev/ses'; then
+                    log_message "INFO" "Skipping enclosure services device: $disk_entry"
+                    continue
                 fi
-            elif echo "$disk_entry" | grep -q 'nvme'; then
-                 is_nvme=1
-                 command_type="nvme"
-                 log_message "DEBUG" "Parsed NVMe (no comma): $device_path"
-            # Standard disk without specific args (likely direct SATA)
-            else
-                 command_type="standard"
-                 log_message "DEBUG" "Parsed Standard Disk (no args): $device_path"
-            fi
 
-            # Skip if disk device does not exist
-            if [ ! -e "$device_path" ]; then
-                log_message "WARN" "Disk device '$device_path' (from entry '$disk_entry') does not exist, skipping."
-                continue
-            fi
+                # --- 1. Parse device path and arguments (Corrected for SATA) ---
+                device_path="$disk_entry"
+                # smartctl_args is now only used for MegaRAID
+                smartctl_args=""
+                is_megaraid=0
+                is_nvme=0
+                # is_atacam_or_sat is now implicitly handled by the 'standard' command type
+                command_type="standard" # Default
 
-            log_message "INFO" "Checking disk: $disk_entry (Command type: $command_type)"
+                if echo "$disk_entry" | grep -q ','; then
+                    device_path=$(echo "$disk_entry" | cut -d, -f1)
+                    type_arg_full=$(echo "$disk_entry" | cut -d, -f2-)
+                    if echo "$type_arg_full" | grep -q 'megaraid'; then
+                        is_megaraid=1
+                        smartctl_args="-d $type_arg_full"
+                        command_type="megaraid"
+                        log_message "DEBUG" "Parsed MegaRAID: $device_path with args $smartctl_args"
+                    elif echo "$type_arg_full" | grep -q 'nvme'; then
+                        is_nvme=1
+                        command_type="nvme"
+                        log_message "DEBUG" "Parsed NVMe: $device_path"
+                    # Note: Removed the atacam/sat branch here.
+                    # The type_arg_full (like 'atacam' or 'sat') is still parsed
+                    # but command_type remains 'standard', which means no additional -d args
+                    # will be passed to the smartctl command itself.
+                    # The type_arg_full is primarily used during parsing to distinguish disk types.
+                    else
+                        # Generic device type argument, treat as standard (e.g., for future types)
+                        command_type="standard"
+                        log_message "DEBUG" "Parsed Generic (Standard with type info): $device_path (type: $type_arg_full)"
+                    fi
+                elif echo "$disk_entry" | grep -q 'nvme'; then
+                     is_nvme=1
+                     command_type="nvme"
+                     log_message "DEBUG" "Parsed NVMe (no comma): $device_path"
+                # Standard disk without specific args (likely direct SATA)
+                else
+                     command_type="standard"
+                     log_message "DEBUG" "Parsed Standard Disk (no args): $device_path"
+                fi
 
-            # --- 2. Execute smartctl based on determined type (Corrected SATA Command) ---
-            SMART_OUTPUT=""
-            TMP_SMART_FILE=$(mktemp)
+                # Skip if disk device does not exist
+                if [ ! -e "$device_path" ]; then
+                    log_message "WARN" "Disk device '$device_path' (from entry '$disk_entry') does not exist, skipping."
+                    continue
+                fi
 
-            case "$command_type" in
-                "megaraid")
-                    # For MegaRAID, use the robust custom timeout function
-                    SMART_OUTPUT=$(run_smartctl_with_timeout "$device_path" "$smartctl_args")
-                    # run_smartctl_with_timeout handles its own errors and returns empty string on failure
-                    # If it fails, SMART_OUTPUT will be empty, and subsequent checks will likely fail.
-                    ;;
-                "nvme")
-                    # For NVMe, call smartctl directly without -d args (usually)
-                    log_message "DEBUG" "Executing standard NVMe command: smartctl -a $device_path"
-                    smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                        local exit_code=$?
-                        log_message "ERROR" "smartctl command for NVMe $device_path failed (exit code $exit_code)."
-                        REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
-                        ERROR_COUNT=$((ERROR_COUNT + 1))
+                log_message "INFO" "Checking disk: $disk_entry (Command type: $command_type)"
+
+                # --- 2. Execute smartctl based on determined type (Corrected SATA Command) ---
+                SMART_OUTPUT=""
+                TMP_SMART_FILE=$(mktemp)
+
+                case "$command_type" in
+                    "megaraid")
+                        # For MegaRAID, use the robust custom timeout function
+                        SMART_OUTPUT=$(run_smartctl_with_timeout "$device_path" "$smartctl_args")
+                        # run_smartctl_with_timeout handles its own errors and returns empty string on failure
+                        # If it fails, SMART_OUTPUT will be empty, and subsequent checks will likely fail.
+                        ;;
+                    "nvme")
+                        # For NVMe, call smartctl directly without -d args (usually)
+                        log_message "DEBUG" "Executing standard NVMe command: smartctl -a $device_path"
+                        smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
+                            local exit_code=$?
+                            log_message "ERROR" "smartctl command for NVMe $device_path failed (exit code $exit_code)."
+                            REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
+                            ERROR_COUNT=$((ERROR_COUNT + 1))
+                            rm -f "$TMP_SMART_FILE"
+                            continue # Skip processing this disk further
+                        }
+                        SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
                         rm -f "$TMP_SMART_FILE"
-                        continue # Skip processing this disk further
-                    }
-                    SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
-                    rm -f "$TMP_SMART_FILE"
-                    ;;
-                "standard")
-                    # For SATA/ATA/ATACAM/SAT without additional -d args
-                    # The type information (atacam/sat) is used for parsing only, not for the command.
-                    log_message "DEBUG" "Executing standard command (no extra -d): smartctl -a $device_path"
-                    if [ "$OS_TYPE" = "bsd" ]; then
-                        if command_exists perl; then
-                            # Use perl alarm for BSD
-                            PERLDB_OPTS="" PERL5OPT="" PERL5DB="" perl -e 'alarm(30); system("smartctl", "-a", @ARGV);' "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                                local perl_exit_code=$?
-                                log_message "ERROR" "smartctl command for $device_path failed or timed out (perl exit code $perl_exit_code)."
-                                REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $perl_exit_code) (ERROR!)\n"
-                                ERROR_COUNT=$((ERROR_COUNT + 1))
-                                rm -f "$TMP_SMART_FILE"
-                                continue # Skip processing this disk further
-                            }
-                        else
-                            # Fallback if perl is not available - run without timeout but check exit code
-                            smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                                local exit_code=$?
-                                log_message "ERROR" "smartctl command for $device_path failed (exit code $exit_code)."
-                                REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
+                        ;;
+                    "standard")
+                        # For SATA/ATA/ATACAM/SAT without additional -d args
+                        # The type information (atacam/sat) is used for parsing only, not for the command.
+                        log_message "DEBUG" "Executing standard command (no extra -d): smartctl -a $device_path"
+                        if [ "$OS_TYPE" = "bsd" ]; then
+                            if command_exists perl; then
+                                # Use perl alarm for BSD
+                                PERLDB_OPTS="" PERL5OPT="" PERL5DB="" perl -e 'alarm(30); system("smartctl", "-a", @ARGV);' "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
+                                    local perl_exit_code=$?
+                                    log_message "ERROR" "smartctl command for $device_path failed or timed out (perl exit code $perl_exit_code)."
+                                    REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $perl_exit_code) (ERROR!)\n"
+                                    ERROR_COUNT=$((ERROR_COUNT + 1))
+                                    rm -f "$TMP_SMART_FILE"
+                                    continue # Skip processing this disk further
+                                }
+                            else
+                                # Fallback if perl is not available - run without timeout but check exit code
+                                smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
+                                    local exit_code=$?
+                                    log_message "ERROR" "smartctl command for $device_path failed (exit code $exit_code)."
+                                    REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed (exit code $exit_code) (ERROR!)\n"
+                                    ERROR_COUNT=$((ERROR_COUNT + 1))
+                                    rm -f "$TMP_SMART_FILE"
+                                    continue # Skip processing this disk further
+                                }
+                            fi
+                        else # Linux
+                            # Use timeout for Linux
+                            timeout 30 smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
+                                local timeout_exit_code=$?
+                                log_message "ERROR" "smartctl command for $device_path failed or timed out (timeout exit code $timeout_exit_code)."
+                                REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $timeout_exit_code) (ERROR!)\n"
                                 ERROR_COUNT=$((ERROR_COUNT + 1))
                                 rm -f "$TMP_SMART_FILE"
                                 continue # Skip processing this disk further
                             }
                         fi
-                    else # Linux
-                        # Use timeout for Linux
-                        timeout 30 smartctl -a "$device_path" > "$TMP_SMART_FILE" 2>&1 || {
-                            local timeout_exit_code=$?
-                            log_message "ERROR" "smartctl command for $device_path failed or timed out (timeout exit code $timeout_exit_code)."
-                            REPORT_BODY+="  - ❌ Disk $device_path: smartctl command failed or timed out (exit code $timeout_exit_code) (ERROR!)\n"
-                            ERROR_COUNT=$((ERROR_COUNT + 1))
-                            rm -f "$TMP_SMART_FILE"
-                            continue # Skip processing this disk further
-                        }
+                        SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
+                        rm -f "$TMP_SMART_FILE"
+                        ;;
+                    *)
+                        # Should not happen if logic above is correct
+                        log_message "ERROR" "Unknown command type '$command_type' for disk $disk_entry. Skipping."
+                        REPORT_BODY+="  - ❌ Disk $device_path: Unknown command type '$command_type' (ERROR!)\n"
+                        ERROR_COUNT=$((ERROR_COUNT + 1))
+                        continue
+                        ;;
+                esac
+
+                # --- 3. Check if SMART is available ---
+                # This section now relies on SMART_OUTPUT being populated correctly.
+                # If previous command failed and skipped using 'continue', this part won't run for that disk.
+                smart_available=0
+                if [ "$is_nvme" -eq 1 ]; then
+                    if printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART overall-health self-assessment test result:"; then
+                        smart_available=1
                     fi
-                    SMART_OUTPUT=$(cat "$TMP_SMART_FILE")
-                    rm -f "$TMP_SMART_FILE"
-                    ;;
-                *)
-                    # Should not happen if logic above is correct
-                    log_message "ERROR" "Unknown command type '$command_type' for disk $disk_entry. Skipping."
-                    REPORT_BODY+="  - ❌ Disk $device_path: Unknown command type '$command_type' (ERROR!)\n"
-                    ERROR_COUNT=$((ERROR_COUNT + 1))
-                    continue
-                    ;;
-            esac
-
-            # --- 3. Check if SMART is available ---
-            # This section now relies on SMART_OUTPUT being populated correctly.
-            # If previous command failed and skipped using 'continue', this part won't run for that disk.
-            smart_available=0
-            if [ "$is_nvme" -eq 1 ]; then
-                if printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART overall-health self-assessment test result:"; then
-                    smart_available=1
-                fi
-            else
-                if printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Available"; then
-                    smart_available=1
-                elif printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Enabled"; then
-                    smart_available=1
-                fi
-            fi
-
-            if [ "$smart_available" -eq 0 ]; then
-                 if [ -n "$SMART_OUTPUT" ] && printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Disabled"; then
-                    WARNING_COUNT=$((WARNING_COUNT + 1))
-                    REPORT_BODY+="\nSMART Status for $disk_entry: DISABLED\n"
-                    log_message "WARN" "Disk $disk_entry has SMART disabled."
-                 else
-                    # This case now also catches if SMART_OUTPUT was empty due to a command failure
-                    REPORT_BODY+="\nSMART Status for $disk_entry: UNAVAILABLE OR FAILED TO READ (Check logs)\n"
-                    log_message "INFO" "SMART is not available, disabled, or failed to read on $disk_entry (Output might be empty due to command failure)."
-                 fi
-                 continue # Skip further processing for this disk if SMART is not available
-            fi
-
-            log_message "INFO" "Processing SMART data for $disk_entry..."
-
-            # --- 4. Extract All Data Points (Robust Parsing) ---
-            # Temporarily disable exit on error for parsing
-            set +e
-
-            # Common
-            DEVICE_MODEL=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "Device Model:|Model Number:" | cut -d: -f2- | xargs)
-            SERIAL_NUMBER=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Serial Number:" | cut -d: -f2- | xargs)
-            FIRMWARE_VERSION=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Firmware Version:" | cut -d: -f2- | xargs)
-            USER_CAPACITY=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "User Capacity:|Total NVM Capacity:" | cut -d: -f2- | xargs)
-            HEALTH_STATUS=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "SMART overall-health self-assessment test result:" | awk '{print $NF}')
-
-            # Type-specific
-            if [ "$is_nvme" -eq 1 ]; then
-                DISK_TYPE="NVMe SSD"
-                INTERFACE="PCIe NVMe"
-                FORM_FACTOR=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Form Factor:" | cut -d: -f2- | xargs || true)
-                FORM_FACTOR=${FORM_FACTOR:-"M.2/U.2"}
-                NVME_VERSION=$(printf '%s\n' "$SMART_OUTPUT" | grep "NVMe Version:" | cut -d: -f2- | xargs || true)
-                POWER_ON_HOURS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Power On Hours:" | awk '{print $4}' | sed 's/,//g' || echo "0")
-                POWER_CYCLE_COUNT=$(printf '%s\n' "$SMART_OUTPUT" | grep "Power Cycles:" | awk '{print $3}' || echo "0")
-                TEMPERATURE=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Temperature:" | awk '{print $2}' || echo "0")
-                PERCENTAGE_USED=$(printf '%s\n' "$SMART_OUTPUT" | grep "Percentage Used:" | awk '{print $3}' | sed 's/%//' || echo "0")
-                DATA_UNITS_WRITTEN=$(printf '%s\n' "$SMART_OUTPUT" | grep "Data Units Written:" | awk '{print $4}' | sed 's/,//g' || echo "0")
-                DATA_UNITS_READ=$(printf '%s\n' "$SMART_OUTPUT" | grep "Data Units Read:" | awk '{print $4}' | sed 's/,//g' || echo "0")
-                UNSAFE_SHUTDOWNS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Unsafe Shutdowns:" | awk '{print $3}' || echo "0")
-                CONTROLLER_BUSY_TIME=$(printf '%s\n' "$SMART_OUTPUT" | grep "Controller Busy Time:" | awk '{print $4}' | sed 's/,//g' || echo "0")
-                TOTAL_LBAS_WRITTEN=$((DATA_UNITS_WRITTEN * 1000)) # Convert Data Units (512k) to LBAs (512)
-            else
-                ROTATION_RATE=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Rotation Rate:" | cut -d: -f2- | xargs || true)
-                FORM_FACTOR=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Form Factor:" | cut -d: -f2- | xargs || true)
-                if [ -n "$ROTATION_RATE" ] && echo "$ROTATION_RATE" | grep -qi "Solid State"; then
-                    DISK_TYPE="SATA SSD"; INTERFACE="SATA"
                 else
-                    DISK_TYPE="HDD"; INTERFACE="SATA/SAS"
+                    if printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Available"; then
+                        smart_available=1
+                    elif printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Enabled"; then
+                        smart_available=1
+                    fi
                 fi
-                POWER_ON_HOURS=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_On_Hours")
-                POWER_CYCLE_COUNT=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_Cycle_Count")
-                TEMPERATURE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Temperature_Celsius")
-                TOTAL_LBAS_WRITTEN=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Total_LBAs_Written")
-                LOAD_CYCLE_COUNT="" # Initialize for non-HDD types
-            fi
-            FORM_FACTOR=${FORM_FACTOR:-"Unknown"}
 
-            # Re-enable exit on error
-            set -e
+                if [ "$smart_available" -eq 0 ]; then
+                     if [ -n "$SMART_OUTPUT" ] && printf '%s\n' "$SMART_OUTPUT" | grep -qi "SMART support is: Disabled"; then
+                        WARNING_COUNT=$((WARNING_COUNT + 1))
+                        REPORT_BODY+="\nSMART Status for $disk_entry: DISABLED\n"
+                        log_message "WARN" "Disk $disk_entry has SMART disabled."
+                     else
+                        # This case now also catches if SMART_OUTPUT was empty due to a command failure
+                        REPORT_BODY+="\nSMART Status for $disk_entry: UNAVAILABLE OR FAILED TO READ (Check logs)\n"
+                        log_message "INFO" "SMART is not available, disabled, or failed to read on $disk_entry (Output might be empty due to command failure)."
+                     fi
+                     continue # Skip further processing for this disk if SMART is not available
+                fi
 
-            # --- 5. Build Report Section ---
-            REPORT_BODY+="\n----------------------------------------------------\n"
-            REPORT_BODY+="💽 Disk: $disk_entry (Type: $DISK_TYPE, Interface: $INTERFACE, FormFactor: $FORM_FACTOR)\n"
-            REPORT_BODY+="----------------------------------------------------\n"
-            [ -n "$DEVICE_MODEL" ] && REPORT_BODY+="Device Model: $DEVICE_MODEL\n"
-            [ -n "$FIRMWARE_VERSION" ] && REPORT_BODY+="Firmware Version: $FIRMWARE_VERSION\n"
-            [ -n "$SERIAL_NUMBER" ] && REPORT_BODY+="Serial Number: $SERIAL_NUMBER\n"
-            [ -n "$USER_CAPACITY" ] && REPORT_BODY+="Capacity: $USER_CAPACITY\n"
-            [ -n "$HEALTH_STATUS" ] && REPORT_BODY+="Health: $HEALTH_STATUS\n"
-            [ -n "$TEMPERATURE" ] && [ "$TEMPERATURE" != "0" ] && REPORT_BODY+="Temperature: ${TEMPERATURE}°C\n"
-            if [ -n "$POWER_ON_HOURS" ] && [ "$POWER_ON_HOURS" != "0" ]; then
-                # Robust calculation for years
+                log_message "INFO" "Processing SMART data for $disk_entry..."
+
+                # --- 4. Extract All Data Points (Robust Parsing) ---
+                # Temporarily disable exit on error for parsing
                 set +e
-                years=$(echo "${POWER_ON_HOURS:-0} / 8760" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}' 2>/dev/null || echo "N/A")
-                set -e
-                if [ "$years" != "N/A" ] && [[ "$years" =~ ^[0-9.]+$ ]]; then
-                    REPORT_BODY+="Power On Hours: $POWER_ON_HOURS (Approx. $years years of operation)\n"
-                else
-                    REPORT_BODY+="Power On Hours: $POWER_ON_HOURS (Calculation failed)\n"
-                    log_message "WARN" "Failed to calculate years for disk $disk_entry (POH: $POWER_ON_HOURS)"
-                fi
-            fi
-            if [ -n "$TOTAL_LBAS_WRITTEN" ]; then
-                # Robust calculation for TBW
-                set +e
-                tbw=$(echo "(${TOTAL_LBAS_WRITTEN:-0} * 512) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
-                set -e
-                if [ "$tbw" != "N/A" ] && [[ "$tbw" =~ ^[0-9.]+$ ]]; then
-                    REPORT_BODY+="Total Data Written: $tbw TB\n"
-                else
-                    REPORT_BODY+="Total Data Written: $TOTAL_LBAS_WRITTEN (Calculation failed)\n"
-                    log_message "WARN" "Failed to calculate TBW for disk $disk_entry (LBAs: $TOTAL_LBAS_WRITTEN)"
-                fi
-            fi
-            if [ -n "$POWER_CYCLE_COUNT" ]; then
-                PCC_STATUS="Normal"
-                if [ "$POWER_CYCLE_COUNT" -gt 10000 ]; then PCC_STATUS="High"; fi
-                REPORT_BODY+="Power Cycles: $POWER_CYCLE_COUNT ($PCC_STATUS)\n"
-            fi
-            REPORT_BODY+="\n----------------------------------------\n"
 
-            if printf '%s\n' "$SMART_OUTPUT" | grep -qi "No Errors Logged"; then
-                REPORT_BODY+="✅ No SMART errors logged\n"
-            else
-                REPORT_BODY+="⚠️ SMART Errors or Selftests present (see details)\n"
-                WARNING_COUNT=$((WARNING_COUNT + 1))
-            fi
+                # Common
+                DEVICE_MODEL=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "Device Model:|Model Number:" | cut -d: -f2- | xargs)
+                SERIAL_NUMBER=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Serial Number:" | cut -d: -f2- | xargs)
+                FIRMWARE_VERSION=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Firmware Version:" | cut -d: -f2- | xargs)
+                USER_CAPACITY=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 -E "User Capacity:|Total NVM Capacity:" | cut -d: -f2- | xargs)
+                HEALTH_STATUS=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "SMART overall-health self-assessment test result:" | awk '{print $NF}')
 
-            # NVMe/SSD Specific Attributes
-            if [ "$DISK_TYPE" = "NVMe SSD" ]; then
-                [ -n "$NVME_VERSION" ] && REPORT_BODY+="NVMe Version: $NVME_VERSION\n"
-                [ -n "$PERCENTAGE_USED" ] && REPORT_BODY+="Percentage Used: ${PERCENTAGE_USED}%\n"
-                [ -n "$PERCENTAGE_USED" ] && REPORT_BODY+="  -> NAND Health: $((100 - PERCENTAGE_USED))%\n"
-                if [ -n "$DATA_UNITS_WRITTEN" ]; then
-                    # Robust calculation for NVMe TBW
+                # Type-specific
+                if [ "$is_nvme" -eq 1 ]; then
+                    DISK_TYPE="NVMe SSD"
+                    INTERFACE="PCIe NVMe"
+                    FORM_FACTOR=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Form Factor:" | cut -d: -f2- | xargs || true)
+                    FORM_FACTOR=${FORM_FACTOR:-"M.2/U.2"}
+                    NVME_VERSION=$(printf '%s\n' "$SMART_OUTPUT" | grep "NVMe Version:" | cut -d: -f2- | xargs || true)
+                    POWER_ON_HOURS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Power On Hours:" | awk '{print $4}' | sed 's/,//g' || echo "0")
+                    POWER_CYCLE_COUNT=$(printf '%s\n' "$SMART_OUTPUT" | grep "Power Cycles:" | awk '{print $3}' || echo "0")
+                    TEMPERATURE=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Temperature:" | awk '{print $2}' || echo "0")
+                    PERCENTAGE_USED=$(printf '%s\n' "$SMART_OUTPUT" | grep "Percentage Used:" | awk '{print $3}' | sed 's/%//' || echo "0")
+                    DATA_UNITS_WRITTEN=$(printf '%s\n' "$SMART_OUTPUT" | grep "Data Units Written:" | awk '{print $4}' | sed 's/,//g' || echo "0")
+                    DATA_UNITS_READ=$(printf '%s\n' "$SMART_OUTPUT" | grep "Data Units Read:" | awk '{print $4}' | sed 's/,//g' || echo "0")
+                    UNSAFE_SHUTDOWNS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Unsafe Shutdowns:" | awk '{print $3}' || echo "0")
+                    CONTROLLER_BUSY_TIME=$(printf '%s\n' "$SMART_OUTPUT" | grep "Controller Busy Time:" | awk '{print $4}' | sed 's/,//g' || echo "0")
+                    TOTAL_LBAS_WRITTEN=$((DATA_UNITS_WRITTEN * 1000)) # Convert Data Units (512k) to LBAs (512)
+                else
+                    ROTATION_RATE=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Rotation Rate:" | cut -d: -f2- | xargs || true)
+                    FORM_FACTOR=$(printf '%s\n' "$SMART_OUTPUT" | grep -m1 "Form Factor:" | cut -d: -f2- | xargs || true)
+                    if [ -n "$ROTATION_RATE" ] && echo "$ROTATION_RATE" | grep -qi "Solid State"; then
+                        DISK_TYPE="SATA SSD"; INTERFACE="SATA"
+                    else
+                        DISK_TYPE="HDD"; INTERFACE="SATA/SAS"
+                    fi
+                    POWER_ON_HOURS=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_On_Hours")
+                    POWER_CYCLE_COUNT=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Power_Cycle_Count")
+                    TEMPERATURE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Temperature_Celsius")
+                    TOTAL_LBAS_WRITTEN=$(get_smart_attr_raw_value "$SMART_OUTPUT" "Total_LBAs_Written")
+                    LOAD_CYCLE_COUNT="" # Initialize for non-HDD types
+                fi
+                FORM_FACTOR=${FORM_FACTOR:-"Unknown"}
+
+                # Re-enable exit on error
+                set -e
+
+                # --- 5. Build Report Section ---
+                REPORT_BODY+="\n----------------------------------------------------\n"
+                REPORT_BODY+="💽 Disk: $disk_entry (Type: $DISK_TYPE, Interface: $INTERFACE, FormFactor: $FORM_FACTOR)\n"
+                REPORT_BODY+="----------------------------------------------------\n"
+                [ -n "$DEVICE_MODEL" ] && REPORT_BODY+="Device Model: $DEVICE_MODEL\n"
+                [ -n "$FIRMWARE_VERSION" ] && REPORT_BODY+="Firmware Version: $FIRMWARE_VERSION\n"
+                [ -n "$SERIAL_NUMBER" ] && REPORT_BODY+="Serial Number: $SERIAL_NUMBER\n"
+                [ -n "$USER_CAPACITY" ] && REPORT_BODY+="Capacity: $USER_CAPACITY\n"
+                [ -n "$HEALTH_STATUS" ] && REPORT_BODY+="Health: $HEALTH_STATUS\n"
+                [ -n "$TEMPERATURE" ] && [ "$TEMPERATURE" != "0" ] && REPORT_BODY+="Temperature: ${TEMPERATURE}°C\n"
+                if [ -n "$POWER_ON_HOURS" ] && [ "$POWER_ON_HOURS" != "0" ]; then
+                    # Robust calculation for years
                     set +e
-                    tbw=$(echo "($DATA_UNITS_WRITTEN * 512000) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
+                    years=$(echo "${POWER_ON_HOURS:-0} / 8760" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}' 2>/dev/null || echo "N/A")
+                    set -e
+                    if [ "$years" != "N/A" ] && [[ "$years" =~ ^[0-9.]+$ ]]; then
+                        REPORT_BODY+="Power On Hours: $POWER_ON_HOURS (Approx. $years years of operation)\n"
+                    else
+                        REPORT_BODY+="Power On Hours: $POWER_ON_HOURS (Calculation failed)\n"
+                        log_message "WARN" "Failed to calculate years for disk $disk_entry (POH: $POWER_ON_HOURS)"
+                    fi
+                fi
+                if [ -n "$TOTAL_LBAS_WRITTEN" ]; then
+                    # Robust calculation for TBW
+                    set +e
+                    tbw=$(echo "(${TOTAL_LBAS_WRITTEN:-0} * 512) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
                     set -e
                     if [ "$tbw" != "N/A" ] && [[ "$tbw" =~ ^[0-9.]+$ ]]; then
-                        REPORT_BODY+="Data Units Written: $tbw TB\n"
+                        REPORT_BODY+="Total Data Written: $tbw TB\n"
                     else
-                        REPORT_BODY+="Data Units Written: $DATA_UNITS_WRITTEN (Calculation failed)\n"
-                        log_message "WARN" "Failed to calculate TBW for NVMe disk $disk_entry (DUW: $DATA_UNITS_WRITTEN)"
+                        REPORT_BODY+="Total Data Written: $TOTAL_LBAS_WRITTEN (Calculation failed)\n"
+                        log_message "WARN" "Failed to calculate TBW for disk $disk_entry (LBAs: $TOTAL_LBAS_WRITTEN)"
                     fi
                 fi
-                if [ -n "$DATA_UNITS_READ" ]; then
-                    # Robust calculation for NVMe TBR
-                    set +e
-                    tbr=$(echo "($DATA_UNITS_READ * 512000) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
-                    set -e
-                    if [ "$tbr" != "N/A" ] && [[ "$tbr" =~ ^[0-9.]+$ ]]; then
-                        REPORT_BODY+="Data Units Read: $tbr TB\n"
-                    else
-                        REPORT_BODY+="Data Units Read: $DATA_UNITS_READ (Calculation failed)\n"
-                        log_message "WARN" "Failed to calculate TBR for NVMe disk $disk_entry (DUR: $DATA_UNITS_READ)"
-                    fi
+                if [ -n "$POWER_CYCLE_COUNT" ]; then
+                    PCC_STATUS="Normal"
+                    if [ "$POWER_CYCLE_COUNT" -gt 10000 ]; then PCC_STATUS="High"; fi
+                    REPORT_BODY+="Power Cycles: $POWER_CYCLE_COUNT ($PCC_STATUS)\n"
                 fi
-                [ -n "$UNSAFE_SHUTDOWNS" ] && REPORT_BODY+="Unsafe Shutdowns: $UNSAFE_SHUTDOWNS\n"
-                [ -n "$CONTROLLER_BUSY_TIME" ] && REPORT_BODY+="Controller Busy Time: ${CONTROLLER_BUSY_TIME} minutes\n"
-            elif [ "$DISK_TYPE" = "SATA SSD" ]; then
-                # Total_LBAs_Written is already handled above
-                :
-            elif [ "$DISK_TYPE" = "HDD" ]; then
-                [ -n "$LOAD_CYCLE_COUNT" ] && REPORT_BODY+="Load Cycle Count: $LOAD_CYCLE_COUNT\n"
-            fi
+                REPORT_BODY+="\n----------------------------------------\n"
 
-            if [ "$is_nvme" -eq 1 ]; then
-                MEDIA_ERRORS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Media and Data Integrity Errors:" | awk '{print $6}' || echo 0)
-                if [ "$MEDIA_ERRORS" -gt 0 ]; then
-                    WARNING_COUNT=$((WARNING_COUNT + 1))
-                    REPORT_BODY+="  - ⚠️ Media and Data Integrity Errors: $MEDIA_ERRORS (WARNING!)\n"
+                if printf '%s\n' "$SMART_OUTPUT" | grep -qi "No Errors Logged"; then
+                    REPORT_BODY+="✅ No SMART errors logged\n"
                 else
-                    REPORT_BODY+="  - ✅ Media and Data Integrity Errors: $MEDIA_ERRORS (OK)\n"
-                fi
-                if [ -n "$PERCENTAGE_USED" ] && [ "$PERCENTAGE_USED" -ge 90 ]; then
+                    REPORT_BODY+="⚠️ SMART Errors or Selftests present (see details)\n"
                     WARNING_COUNT=$((WARNING_COUNT + 1))
-                    REPORT_BODY+="  - ⚠️ Percentage Used: ${PERCENTAGE_USED}% (WARNING!)\n"
-                else
-                    REPORT_BODY+="  - ✅ Percentage Used: ${PERCENTAGE_USED:-0}% (OK)\n"
                 fi
-            else
-                # Check critical attributes for non-NVMe disks
-                for ATTR in "${CRITICAL_SMART_ATTRIBUTES[@]}"; do
-                    ATTR_VALUE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "$ATTR")
-                    if [ "$ATTR_VALUE" -gt 0 ]; then
+
+                # NVMe/SSD Specific Attributes
+                if [ "$DISK_TYPE" = "NVMe SSD" ]; then
+                    [ -n "$NVME_VERSION" ] && REPORT_BODY+="NVMe Version: $NVME_VERSION\n"
+                    [ -n "$PERCENTAGE_USED" ] && REPORT_BODY+="Percentage Used: ${PERCENTAGE_USED}%\n"
+                    [ -n "$PERCENTAGE_USED" ] && REPORT_BODY+="  -> NAND Health: $((100 - PERCENTAGE_USED))%\n"
+                    if [ -n "$DATA_UNITS_WRITTEN" ]; then
+                        # Robust calculation for NVMe TBW
+                        set +e
+                        tbw=$(echo "($DATA_UNITS_WRITTEN * 512000) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
+                        set -e
+                        if [ "$tbw" != "N/A" ] && [[ "$tbw" =~ ^[0-9.]+$ ]]; then
+                            REPORT_BODY+="Data Units Written: $tbw TB\n"
+                        else
+                            REPORT_BODY+="Data Units Written: $DATA_UNITS_WRITTEN (Calculation failed)\n"
+                            log_message "WARN" "Failed to calculate TBW for NVMe disk $disk_entry (DUW: $DATA_UNITS_WRITTEN)"
+                        fi
+                    fi
+                    if [ -n "$DATA_UNITS_READ" ]; then
+                        # Robust calculation for NVMe TBR
+                        set +e
+                        tbr=$(echo "($DATA_UNITS_READ * 512000) / 1000000000000" | bc -l 2>/dev/null | awk '{printf "%.2f", $1}' 2>/dev/null || echo "N/A")
+                        set -e
+                        if [ "$tbr" != "N/A" ] && [[ "$tbr" =~ ^[0-9.]+$ ]]; then
+                            REPORT_BODY+="Data Units Read: $tbr TB\n"
+                        else
+                            REPORT_BODY+="Data Units Read: $DATA_UNITS_READ (Calculation failed)\n"
+                            log_message "WARN" "Failed to calculate TBR for NVMe disk $disk_entry (DUR: $DATA_UNITS_READ)"
+                        fi
+                    fi
+                    [ -n "$UNSAFE_SHUTDOWNS" ] && REPORT_BODY+="Unsafe Shutdowns: $UNSAFE_SHUTDOWNS\n"
+                    [ -n "$CONTROLLER_BUSY_TIME" ] && REPORT_BODY+="Controller Busy Time: ${CONTROLLER_BUSY_TIME} minutes\n"
+                elif [ "$DISK_TYPE" = "SATA SSD" ]; then
+                    # Total_LBAs_Written is already handled above
+                    :
+                elif [ "$DISK_TYPE" = "HDD" ]; then
+                    [ -n "$LOAD_CYCLE_COUNT" ] && REPORT_BODY+="Load Cycle Count: $LOAD_CYCLE_COUNT\n"
+                fi
+
+                if [ "$is_nvme" -eq 1 ]; then
+                    MEDIA_ERRORS=$(printf '%s\n' "$SMART_OUTPUT" | grep "Media and Data Integrity Errors:" | awk '{print $6}' || echo 0)
+                    if [ "$MEDIA_ERRORS" -gt 0 ]; then
                         WARNING_COUNT=$((WARNING_COUNT + 1))
-                        REPORT_BODY+="  - ⚠️ $ATTR: $ATTR_VALUE (WARNING!)\n"
+                        REPORT_BODY+="  - ⚠️ Media and Data Integrity Errors: $MEDIA_ERRORS (WARNING!)\n"
                     else
-                        REPORT_BODY+="  - ✅ $ATTR: $ATTR_VALUE (OK)\n"
+                        REPORT_BODY+="  - ✅ Media and Data Integrity Errors: $MEDIA_ERRORS (OK)\n"
                     fi
-                done
-            fi
+                    if [ -n "$PERCENTAGE_USED" ] && [ "$PERCENTAGE_USED" -ge 90 ]; then
+                        WARNING_COUNT=$((WARNING_COUNT + 1))
+                        REPORT_BODY+="  - ⚠️ Percentage Used: ${PERCENTAGE_USED}% (WARNING!)\n"
+                    else
+                        REPORT_BODY+="  - ✅ Percentage Used: ${PERCENTAGE_USED:-0}% (OK)\n"
+                    fi
+                else
+                    # Check critical attributes for non-NVMe disks
+                    for ATTR in "${CRITICAL_SMART_ATTRIBUTES[@]}"; do
+                        ATTR_VALUE=$(get_smart_attr_raw_value "$SMART_OUTPUT" "$ATTR")
+                        if [ "$ATTR_VALUE" -gt 0 ]; then
+                            WARNING_COUNT=$((WARNING_COUNT + 1))
+                            REPORT_BODY+="  - ⚠️ $ATTR: $ATTR_VALUE (WARNING!)\n"
+                        else
+                            REPORT_BODY+="  - ✅ $ATTR: $ATTR_VALUE (OK)\n"
+                        fi
+                    done
+                fi
 
-            REPORT_BODY+="\n"
-            log_message "INFO" "Completed processing $disk_entry"
-        done
+                REPORT_BODY+="\n"
+                log_message "INFO" "Completed processing $disk_entry"
+            done
+        fi
     fi
 
     # 3. Finalize and Send Report
