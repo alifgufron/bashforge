@@ -229,7 +229,7 @@ backup_databases() {
         
         local sql_filename="${db}"
         if [[ "${COMPRESSION_ENABLED,,}" == "no" && "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
-            sql_filename+="_$(mktemp -u XXXXXX)"
+            sql_filename+="_$(date +%H%M%S)"
         fi
         sql_filename+=".sql"
         
@@ -284,7 +284,7 @@ compress_backups() {
 
     local unique_id_suffix=""
     if [[ "${UNIQUE_ID_ENABLED,,}" == "yes" ]]; then
-        unique_id_suffix="_$(mktemp -u XXXXXX)"
+        unique_id_suffix="_$(date +%H%M%S)"
     fi
 
     if [[ "$COMPRESSION_STRATEGY" == "per_database" ]]; then

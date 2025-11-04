@@ -9,7 +9,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 -   **Configurable Compression Strategy:** If compression is enabled, choose between:
     -   `per_database`: Each database is compressed into its own archive (`DBNAME_UNIQUEID.tar.ext`).
     -   `per_job`: All successful database dumps from a single run are combined into one archive (`DD_UNIQUEID.tar.ext`).
--   **Unique File Naming:** Option to append a unique ID to backup filenames (`UNIQUE_ID_ENABLED="yes"`) to support multiple backups within a day. If `UNIQUE_ID_ENABLED="no"`, backup files for the same day will be overwritten.
+-   **Unique File Naming:** Option to append a unique ID (timestamp `HHMMSS`) to backup filenames (`UNIQUE_ID_ENABLED="yes"`) to support multiple backups within a day. If `UNIQUE_ID_ENABLED="no"`, backup files for the same day will be overwritten.
 -   **Retention Management:** Automatically deletes old backups based on a configured count, sorted by modification time. Set `RETENTION_COUNT=0` to disable cleanup entirely. **Note:** If `UNIQUE_ID_ENABLED="no"`, `RETENTION_COUNT` is ignored, and no old backups will be cleaned up.
 -   **Detailed Email Notifications:** Sends comprehensive backup status reports (start, success, failure) with file sizes, locations, lists of old backups, and a list of **deleted old backups** (conditional on `UNIQUE_ID_ENABLED`).
 -   **Execution Mode Detection:** Adjusts console output when run interactively or via cron (INFO messages only in interactive console, ERROR/FATAL always).
@@ -53,7 +53,7 @@ Some important parameters you need to adjust:
 -   `COMPRESSION_ENABLED`: `yes` to enable compression, `no` to store raw `.sql` files.
 -   `COMPRESSION_STRATEGY`: `per_database` or `per_job`. **Only relevant if `COMPRESSION_ENABLED="yes"`.**
 -   `COMPRESSION_TYPE`: `gzip`, `bzip2`, or `xz`. **Only relevant if `COMPRESSION_ENABLED="yes"`.**
--   `UNIQUE_ID_ENABLED`: `yes` to append unique IDs to filenames (e.g., `db_UNIQUEID.sql` or `db_UNIQUEID.tar.gz`), `no` otherwise. If `no`, backup files for the same day will be overwritten.
+-   `UNIQUE_ID_ENABLED`: `yes` to append unique IDs (timestamp `HHMMSS`) to filenames (e.g., `db_HHMMSS.sql` or `db_HHMMSS.tar.gz`), `no` otherwise. If `no`, backup files for the same day will be overwritten.
 -   `RETENTION_COUNT`: Number of backups to keep (0 to disable cleanup). **Note:** If `UNIQUE_ID_ENABLED="no"`, `RETENTION_COUNT` is ignored, and no old backups will be cleaned up.
 -   `MIN_DISK_SPACE_GB`: Minimum required free disk space.
 -   `MAIL_TO`, `MAIL_FROM`, `NOTIFY_ON_START`: Email notification settings.
