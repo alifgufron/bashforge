@@ -57,8 +57,7 @@ if [[ -z "$TO" || -z "$FROM" || -z "$SUBJECT" || -z "$BODY" ]]; then
   exit 1
 fi
 
-# --- Encode Subject (UTF-8 / emoji support) ---
-ENCODED_SUBJECT="=?UTF-8?B?$(echo -n "$SUBJECT" | base64)?="
+# --- Subject is sent as raw UTF-8, as modern MTAs handle it. ---
 
 # --- Temp mail file ---
 MAILFILE=$(mktemp)
@@ -77,36 +76,51 @@ encode_file() {
 }
 
 # --- Build email ---
-{
-  echo "From: ${FROM}"
-  echo "To: ${TO}"
-  echo "Subject: ${ENCODED_SUBJECT}"
-  echo "MIME-Version: 1.0"
-  echo "Content-Type: multipart/mixed; boundary=\"${BOUNDARY}\""
-  echo
-  echo "--${BOUNDARY}"
-  echo "Content-Type: text/plain; charset=UTF-8"
-  echo "Content-Transfer-Encoding: 8bit"
-  echo
-  echo -e "$BODY"
-  echo
+# Check if we have attachments or images.
+if [[ -z "$IMAGE" && -z "$ATTACH" ]]; then
+  # --- Build a SIMPLE text/plain email (more robust) ---
+  {
+    echo "From: ${FROM}"
+    echo "To: ${TO}"
+    echo "Subject: ${SUBJECT}"
+    echo "MIME-Version: 1.0"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo "Content-Transfer-Encoding: 8bit"
+    echo
+    printf "%b" "$BODY"
+  } > "$MAILFILE"
+else
+  # --- Build a MULTIPART email for attachments/images ---
+  {
+    echo "From: ${FROM}"
+    echo "To: ${TO}"
+    echo "Subject: ${SUBJECT}"
+    echo "MIME-Version: 1.0"
+    echo "Content-Type: multipart/mixed; boundary=\"${BOUNDARY}\""
+    echo
+    echo "--${BOUNDARY}"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo "Content-Transfer-Encoding: 8bit"
+    echo
+    printf "%b" "$BODY"
+    echo
 
-  # --- Image attachment (if any) ---
-  if [[ -n "$IMAGE" && -f "$IMAGE" ]]; then
-    encode_file "$IMAGE"
-  fi
+    # --- Image attachment (if any) ---
+    if [[ -n "$IMAGE" && -f "$IMAGE" ]]; then
+      encode_file "$IMAGE"
+    fi
 
-  # --- Multiple attachments (comma separated) ---
-  if [[ -n "$ATTACH" ]]; then
-    IFS=',' read -ra FILES <<< "$ATTACH"
-    for f in "${FILES[@]}"; do
-      [[ -f "$f" ]] && encode_file "$f" || echo "⚠️ Skipping missing file: $f" >&2
-    done
-  fi
+    # --- Multiple attachments (comma separated) ---
+    if [[ -n "$ATTACH" ]]; then
+      IFS=',' read -ra FILES <<< "$ATTACH"
+      for f in "${FILES[@]}"; do
+        [[ -f "$f" ]] && encode_file "$f" || echo "⚠️ Skipping missing file: $f" >&2
+      done
+    fi
 
-  echo "--${BOUNDARY}--"
-} > "$MAILFILE"
-
+    echo "--${BOUNDARY}--"
+  } > "$MAILFILE"
+fi
 # --- Send email ---
 if sendmail -t < "$MAILFILE"; then
   echo "✅ Email sent to $TO"
