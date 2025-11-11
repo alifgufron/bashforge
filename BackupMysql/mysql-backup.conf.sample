@@ -10,6 +10,9 @@ MYSQL_PASS="yourpassword"
 # MySQL host address (e.g., 127.0.0.1, localhost, or remote IP/hostname).
 MYSQL_HOST="127.0.0.1"
 
+# MySQL port. Leave empty to use the default port (3306).
+MYSQL_PORT=""
+
 # The command to use for mysqldump. Can be a name in PATH or an absolute path.
 # This is useful if you have multiple versions of mysqldump installed.
 # Example: MYSQLDUMP_CMD="mysqldump57"

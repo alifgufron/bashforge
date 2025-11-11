@@ -159,6 +159,9 @@ check_deps() {
 check_db_connection() {
     log "INFO: Checking MySQL connection and database list..."
     local mysql_auth_opts=(-u"$MYSQL_USER" -p"$MYSQL_PASS" -h"$MYSQL_HOST")
+    if [[ -n "${MYSQL_PORT:-}" ]]; then
+        mysql_auth_opts+=(-P "$MYSQL_PORT")
+    fi
     local error_output
     error_output=$(mktemp)
     
@@ -219,6 +222,9 @@ get_tar_options() {
 backup_databases() {
     local dest_dir="$1"
     local mysql_dump_opts=(-u"$MYSQL_USER" -p"$MYSQL_PASS" -h"$MYSQL_HOST")
+    if [[ -n "${MYSQL_PORT:-}" ]]; then
+        mysql_dump_opts+=(-P "$MYSQL_PORT")
+    fi
     # Append extra options from config if the variable is set. Word splitting is intentional.
     if [[ -n "${MYSQLDUMP_EXTRA_OPTS:-}" ]]; then
         mysql_dump_opts+=($MYSQLDUMP_EXTRA_OPTS)

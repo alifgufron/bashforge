@@ -5,6 +5,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 
 ## Key Features
 -   **Flexible Backup:** Automatically backs up all databases (with exclusions) or specific databases.
+-   **Configurable mysqldump Command:** Allows specifying the exact `mysqldump` executable to use, useful for environments with multiple MySQL versions.
 -   **Flexible Compression:** Option to enable or disable compression entirely (`COMPRESSION_ENABLED`).
 -   **Configurable Compression Strategy:** If compression is enabled, choose between:
     -   `per_database`: Each database is compressed into its own archive (`DBNAME_UNIQUEID.tar.ext`).
@@ -44,6 +45,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
 ## Configuration (`mysql-backup.conf`)
 Some important parameters you need to adjust:
 -   `MYSQL_HOST`: MySQL host address.
+-   `MYSQL_PORT`: MySQL port. Leave empty to use the default port (3306).
 -   `MYSQLDUMP_CMD`: The command or absolute path to the `mysqldump` executable to use (e.g., `mysqldump`, `mysqldump57`, `/usr/local/bin/mysqldump`).
 -   `MYSQLDUMP_EXTRA_OPTS`: Additional options passed directly to `mysqldump`. Useful for compatibility with different MySQL versions. Refer to the comments in `mysql-backup.conf.sample` for detailed examples.
 -   `BACKUP_ALL_DATABASES`: `yes` to back up all, `no` for specific databases.
