@@ -11,7 +11,7 @@ This Bash script provides a robust and flexible solution for backing up MySQL da
     -   `per_database`: Each database is compressed into its own archive (`DBNAME_UNIQUEID.tar.ext`).
     -   `per_job`: All successful database dumps from a single run are combined into one archive (`DD_UNIQUEID.tar.ext`).
 -   **Unique File Naming:** Option to append a unique ID (timestamp `HHMMSS`) to backup filenames (`UNIQUE_ID_ENABLED="yes"`) to support multiple backups within a day. If `UNIQUE_ID_ENABLED="no"`, backup files for the same day will be overwritten.
--   **Retention Management:** Automatically deletes old backups based on a configured count, sorted by modification time. Set `RETENTION_COUNT=0` to disable cleanup entirely. **Note:** If `UNIQUE_ID_ENABLED="no"`, `RETENTION_COUNT` is ignored, and no old backups will be cleaned up.
+-   **Retention Management:** Automatically deletes old backups based on a configured count, sorted by modification time. It also cleans up any empty date directories left behind after cleanup. Set `RETENTION_COUNT=0` to disable cleanup entirely. **Note:** If `UNIQUE_ID_ENABLED="no"`, `RETENTION_COUNT` is ignored, and no old backups will be cleaned up.
 -   **Detailed Email Notifications:** Sends comprehensive backup status reports (start, success, failure) with file sizes, locations, lists of old backups, and a list of **deleted old backups** (conditional on `UNIQUE_ID_ENABLED`).
 -   **Execution Mode Detection:** Adjusts console output when run interactively or via cron (INFO messages only in interactive console, ERROR/FATAL always).
 -   **Lock File:** Prevents simultaneous script execution.

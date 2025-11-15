@@ -408,6 +408,9 @@ cleanup_old_backups() {
         log "INFO: No old backups found for deletion."
     fi
 
+    log "INFO: Cleaning up empty date directories..."
+    find "$base_host_dir" -type d -empty -delete
+
     log "INFO: Cleanup finished."
 }
 
